@@ -13,7 +13,9 @@ const TPLogic = (() => {
 
   const isObj = v => v !== null && typeof v === 'object' && !Array.isArray(v);
   const S = (v, max) => (typeof v === 'string' ? v.trim().slice(0, max) : '');
-  const U = v => (Number.isFinite(v) && v >= 0 ? Math.floor(v) : 0);
+  // 更新時刻は「いまから1日先」までに切り詰める(未来すぎる時刻で、いつも勝つ変更を防ぐ)
+  const FUTURE_MS = 24 * 60 * 60 * 1000;
+  const U = v => (Number.isFinite(v) && v >= 0 ? Math.min(Math.floor(v), Date.now() + FUTURE_MS) : 0);
   const byName = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
 
   function stable(x) {
@@ -79,7 +81,8 @@ const TPLogic = (() => {
         if (!Array.isArray(p) || typeof p[0] !== 'string' || !Number.isFinite(p[1]) || p[1] === 0) continue;
         const n = S(p[0], 30);
         if (!n) continue;
-        const t = Math.trunc(p[1]);
+        const t = Math.sign(p[1]) * Math.min(Math.abs(Math.trunc(p[1])), Date.now() + FUTURE_MS);
+        if (t === 0) continue;
         const cur = m.get(n);
         if (cur === undefined || Math.abs(t) > Math.abs(cur) || (Math.abs(t) === Math.abs(cur) && t > 0)) m.set(n, t);
       }
@@ -113,8 +116,9 @@ const TPLogic = (() => {
     m = isObj(m) ? m : {};
     return {
       year: Number.isInteger(m.year) && m.year >= 2000 && m.year <= 2100 ? m.year : 2027,
+      yu: Number.isFinite(m.yu) ? U(m.yu) : U(m.u), // 年を直した時刻(古いデータは u を使う)
       rate: Number.isFinite(m.rate) && m.rate > 0 && m.rate <= 100000 ? m.rate : null,
-      u: U(m.u),
+      ru: Number.isFinite(m.ru) ? U(m.ru) : U(m.u), // レートを直した時刻
     };
   }
   const DAY_ID = /^d(10|[1-9])$/;
@@ -131,6 +135,7 @@ const TPLogic = (() => {
       };
     },
     ideas: (e, id) => {
+      if (e.vo === true) return { id, vo: true, v: cleanVotes(e.v), u: 0 }; // 共有リンク用: 投票だけ
       let cost = null;
       if (Number.isFinite(e.costUSD) && e.costUSD >= 0 && e.costUSD <= 100000) cost = Math.round(e.costUSD * 100) / 100;
       return {
@@ -179,7 +184,7 @@ const TPLogic = (() => {
     return CLEAN[kind](e, id);
   }
   function emptyState() {
-    return { app: APP_ID, v: 1, meta: { year: 2027, rate: null, u: 0 }, days: [], items: [], ideas: [], people: [], expenses: [], checks: [] };
+    return { app: APP_ID, v: 1, meta: { year: 2027, yu: 0, rate: null, ru: 0 }, days: [], items: [], ideas: [], people: [], expenses: [], checks: [] };
   }
   function sanitize(raw) {
     if (!isObj(raw) || raw.app !== APP_ID) throw new Error('このアプリのデータではありません');
@@ -244,6 +249,13 @@ const TPLogic = (() => {
     if (r.u < l.u) return l;
     return stable(strip(r)) > stable(strip(l)) ? r : l;
   }
+  // 年とレートは別々に、新しく直した方を採用(同時刻なら値の大きい方)
+  function mergeMeta(l, r) {
+    const pick = (lt, lv, rt, rv) => (rt > lt || (rt === lt && stable(rv) > stable(lv)) ? [rt, rv] : [lt, lv]);
+    const [yu, year] = pick(l.yu, l.year, r.yu, r.year);
+    const [ru, rate] = pick(l.ru, l.rate, r.ru, r.rate);
+    return { year, yu, rate, ru };
+  }
   function mergeEntity(kind, l, r) {
     let m = pickNewer(l, r);
     // 作った人(by)は、空でない値のうち辞書順で最小のもの。削除済みの記録にも残す。
@@ -259,7 +271,7 @@ const TPLogic = (() => {
     const keys = new Set([...Object.keys(l), ...Object.keys(m)]);
     const out = [];
     for (const k of keys) {
-      if (k === 'id' || k === 'u' || k === 'v') continue;
+      if (k === 'id' || k === 'u' || k === 'v' || k === 'yu' || k === 'ru') continue;
       if (stable(l[k]) !== stable(m[k])) out.push(FIELD_JP[k] || k);
     }
     return out;
@@ -270,15 +282,29 @@ const TPLogic = (() => {
     const out = clone(local);
     const changes = [];
     const lm = local.meta, rm = incoming.meta;
-    const mm = pickNewer(lm, rm);
+    const mm = mergeMeta(lm, rm);
     if (stable(mm) !== stable(lm)) {
       out.meta = clone(mm);
-      changes.push({ kind: 'meta', type: 'update', id: 'meta', label: label('meta'), detail: diffFields(lm, mm).join('・') });
+      const mf = diffFields(lm, mm);
+      if (mf.length) changes.push({ kind: 'meta', type: 'update', id: 'meta', label: label('meta'), detail: mf.join('・') });
     }
     for (const kind of KINDS) {
       const idx = new Map(out[kind].map((e, i) => [e.id, i]));
       for (const r of incoming[kind]) {
         const i = idx.get(r.id);
+        if (kind === 'ideas' && r.vo) { // 投票だけの記録: 手元にあるアイデアに票を足す(手元にないものは無視)
+          if (i === undefined) continue;
+          const l = out[kind][i];
+          const v = cleanVotes([...(l.v || []), ...r.v]);
+          if (stable(v) === stable(l.v || [])) continue;
+          const before = new Set(voters(l)), after = new Set(voters({ v }));
+          out[kind][i] = Object.assign({}, l, { v });
+          const plus = [...after].filter(n => !before.has(n)), minus = [...before].filter(n => !after.has(n));
+          if (!l.deleted && (plus.length || minus.length)) {
+            changes.push({ kind, type: 'votes', id: r.id, label: label(kind, l), detail: (plus.length ? '投票+ ' + plus.join('、') : '') + (plus.length && minus.length ? ' / ' : '') + (minus.length ? '票の取り消し ' + minus.join('、') : '') });
+          }
+          continue;
+        }
         if (i === undefined) {
           idx.set(r.id, out[kind].length);
           out[kind].push(clone(r));
@@ -303,7 +329,7 @@ const TPLogic = (() => {
             const parts = [];
             if (f.length) parts.push(f.join('・') + 'が変わる');
             if (plus.length) parts.push('投票+ ' + plus.join('、'));
-            if (minus.length) parts.push('投票取消 ' + minus.join('、'));
+            if (minus.length) parts.push('票の取り消し ' + minus.join('、'));
             changes.push({ kind, type: f.length ? 'update' : 'votes', id: r.id, label: label(kind, m), detail: parts.join(' / ') });
           }
         } else if (!l.deleted && !r.deleted && stable(strip(l)) !== stable(strip(r))) {
@@ -399,7 +425,8 @@ const TPLogic = (() => {
     const out = emptyState();
     out.meta = state.meta;
     for (const kind of KINDS) {
-      out[kind] = state[kind].filter(e => e.u > 0 || (kind === 'ideas' && e.v && e.v.length));
+      out[kind] = state[kind].filter(e => e.u > 0 || (kind === 'ideas' && e.v && e.v.length))
+        .map(e => (kind === 'ideas' && e.u === 0 ? { id: e.id, vo: true, v: e.v, u: 0 } : e)); // 触っていないアイデアは id と投票だけ送る
     }
     return out;
   }

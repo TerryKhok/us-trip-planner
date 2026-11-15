@@ -21,7 +21,7 @@ body {
   padding-bottom: calc(76px + env(safe-area-inset-bottom));
 }
 header.top { background: var(--pri); color: var(--pri-ink); padding: 14px 16px 10px; padding-top: calc(14px + env(safe-area-inset-top)); display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 6px 10px; }
-.who { flex: none; margin-left: auto; font: inherit; font-size: .85rem; min-height: 40px; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 4px 12px; border-radius: 999px; border: 1px solid rgba(255, 255, 255, .6); background: rgba(255, 255, 255, .15); color: var(--pri-ink); cursor: pointer; }
+.who { flex: none; margin-left: auto; font: inherit; font-size: .85rem; min-height: 44px; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 4px 12px; border-radius: 999px; border: 1px solid rgba(255, 255, 255, .6); background: rgba(255, 255, 255, .15); color: var(--pri-ink); cursor: pointer; }
 .icons { display: grid; grid-template-columns: repeat(auto-fill, minmax(48px, 1fr)); gap: 6px; margin: 6px 0; }
 .icon-btn { font-size: 1.5rem; min-height: 48px; border-radius: 10px; border: 2px solid var(--line); background: var(--card); cursor: pointer; }
 .icon-btn.on { border-color: var(--pri); background: var(--pri-soft); }
@@ -46,7 +46,7 @@ button, .btn { font: inherit; }
 }
 .btn.primary { background: var(--pri); color: var(--pri-ink); border-color: var(--pri); font-weight: 600; }
 .btn.danger { color: var(--danger); }
-.btn.small { min-height: 36px; padding: 4px 10px; font-size: .85rem; }
+.btn.small { min-height: 44px; padding: 4px 10px; font-size: .85rem; }
 .btn.vote.on { background: var(--pri-soft); border-color: var(--pri); color: var(--pri); font-weight: 700; }
 .btn:disabled { opacity: .5; cursor: not-allowed; }
 :focus-visible { outline: 3px solid #f59e0b; outline-offset: 2px; }
@@ -72,7 +72,8 @@ nav.tabs button[aria-current=page] { color: var(--pri); font-weight: 700; box-sh
 
 /* 旅程 */
 .day h3 { font-size: 1rem; }
-.day .city { max-width: 15em; min-height: 36px; padding: 4px 8px; }
+.row.between.day-head { flex-wrap: wrap; }
+.day .city { flex: 1 1 10em; min-width: 0; max-width: 100%; min-height: 44px; padding: 4px 8px; }
 ul.plain { list-style: none; margin: 8px 0 0; padding: 0; }
 .item { display: grid; grid-template-columns: 3.6em 1fr auto; gap: 8px; padding: 8px 0; border-top: 1px solid var(--line); }
 .item .time { font-variant-numeric: tabular-nums; color: var(--mute); font-size: .9rem; }
@@ -102,7 +103,7 @@ a { color: var(--pri); overflow-wrap: anywhere; }
 /* 予算 */
 .chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0; }
 .chip { display: inline-flex; align-items: center; gap: 2px; background: var(--pri-soft); color: var(--ink); border-radius: 999px; padding: 2px 4px 2px 12px; }
-.chip button { border: 0; background: none; color: var(--mute); font-size: 1.1rem; min-width: 36px; min-height: 36px; cursor: pointer; }
+.chip button { border: 0; background: none; color: var(--mute); font-size: 1.1rem; min-width: 44px; min-height: 44px; cursor: pointer; }
 table { width: 100%; border-collapse: collapse; font-size: .9rem; }
 th, td { padding: 6px 4px; border-bottom: 1px solid var(--line); text-align: right; }
 th:first-child, td:first-child { text-align: left; }
@@ -114,10 +115,12 @@ th:first-child, td:first-child { text-align: left; }
 /* チェック */
 .chk-row { display: flex; align-items: center; gap: 4px; border-top: 1px solid var(--line); }
 .chk-row label { flex: 1; }
+.chk-row .btn.small { min-width: 44px; padding: 4px 0; }
 .chk-row .done { text-decoration: line-through; color: var(--mute); }
 
 /* ダイアログ・通知 */
 dialog.modal { width: min(94vw, 560px); max-height: 90vh; overflow: auto; border: 1px solid var(--line); border-radius: 14px; background: var(--card); color: var(--ink); padding: 16px; }
+dialog.modal.fb { display: block; position: fixed; top: 4vh; left: 3vw; right: 3vw; width: auto; z-index: 50; box-shadow: 0 0 0 100vmax rgba(0, 0, 0, .5); }
 dialog.modal::backdrop { background: rgba(0, 0, 0, .5); }
 dialog.modal h2 { margin: 0 0 10px; }
 .actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 12px; flex-wrap: wrap; }
@@ -128,3 +131,7 @@ dialog.modal h2 { margin: 0 0 10px; }
 .linkbox { font-size: .8rem; word-break: break-all; }
 @media (min-width: 700px) { main { padding: 20px 12px; } }
 @media print { nav.tabs, #toast, .ops, .actions { display: none; } }
+@media (max-width: 380px) {
+  .item { grid-template-columns: 3em 1fr; }
+  .item .ops { grid-column: 2; flex-direction: row; }
+}
