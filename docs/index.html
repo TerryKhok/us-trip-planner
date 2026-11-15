@@ -2,11 +2,45 @@
 <html lang="ja">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Trip planner</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<!-- 外部への通信は一切なし。file: は直接ファイルを開いた時の確認用 -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'self' file:; img-src 'self' data:; object-src 'none'; base-uri 'none'; form-action 'none'">
+<meta name="referrer" content="no-referrer">
+<meta name="robots" content="noindex, nofollow">
+<meta name="theme-color" content="#0b6b8a">
+<title>アメリカ卒業旅行プランナー</title>
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="stylesheet" href="style.css">
 </head>
 <body>
-<h1>準備中</h1>
-<p>Trip planner is coming soon.</p>
+<header class="top">
+  <div>
+    <h1>🌴 アメリカ卒業旅行プランナー</h1>
+    <p class="sub">サンフランシスコ → ロサンゼルス ・ 1/31〜2/9</p>
+  </div>
+  <button type="button" id="me-btn" class="who" aria-label="プロフィールを選ぶ・切りかえる">👤 名前を選ぶ</button>
+</header>
+
+<aside class="notice" role="note">
+  <strong>⚠ このページは公開されています。</strong>
+  パスポート番号・カード番号・予約番号・ホテルの部屋情報・自宅の住所は<u>入力しないでください</u>。
+</aside>
+
+<main id="app" tabindex="-1"></main>
+
+<nav class="tabs" aria-label="メニュー">
+  <button type="button" data-tab="itinerary"><span aria-hidden="true">🗓</span>旅程</button>
+  <button type="button" data-tab="ideas"><span aria-hidden="true">💡</span>アイデア</button>
+  <button type="button" data-tab="budget"><span aria-hidden="true">💵</span>予算</button>
+  <button type="button" data-tab="checks"><span aria-hidden="true">✅</span>チェック</button>
+  <button type="button" data-tab="share"><span aria-hidden="true">🔗</span>共有</button>
+</nav>
+
+<div id="toast" role="status" aria-live="polite"></div>
+<noscript><p class="notice">このページはJavaScriptが必要です。</p></noscript>
+
+<script src="logic.js"></script>
+<script src="app.js"></script>
 </body>
 </html>
