@@ -58,6 +58,18 @@ const TPLogic = (() => {
   function mapUrl(q) {
     return 'https://www.google.com/maps/search/?api=1&query=' + encodeURIComponent(q);
   }
+  // その日の予定の場所を順に結ぶ Google マップの経路リンク(キー不要・地図は埋め込まない)。2か所未満なら ''。
+  function routeUrl(stops, mode) {
+    const s = [];
+    for (const x of stops) { const t = S(x, 150); if (t && t !== s[s.length - 1]) s.push(t); }
+    const use = s.slice(0, 10); // 出発+経由8+到着まで
+    if (use.length < 2) return '';
+    const q = encodeURIComponent;
+    let u = 'https://www.google.com/maps/dir/?api=1&origin=' + q(use[0]) + '&destination=' + q(use[use.length - 1]) + '&travelmode=' + (mode || 'transit');
+    if (use.length > 2) u += '&waypoints=' + use.slice(1, -1).map(q).join('%7C');
+    return u;
+  }
+  const lineShareUrl = text => 'https://line.me/R/share?text=' + encodeURIComponent(text);
 
   // ---------- 日付 ----------
   function dayDate(year, n) { // n = 1..10 、1/31 が Day1
@@ -73,7 +85,16 @@ const TPLogic = (() => {
   }
 
   // ---------- 投票 ----------
-  // votes: [[名前, 時刻]] 。時刻が正=投票あり、負=取り消し。名前ごとに絶対値が大きい方が新しい。
+  // votes: [[名前, 時刻, 答え]] 。時刻が正=答えあり、負=取り消し。名前ごとに時刻の絶対値が大きい方が新しい。
+  // 答え: 'g'=行く(省略してよい・古いデータはこれ) / 'm'=迷う / 'n'=行かない
+  const CHOICES = ['g', 'm', 'n'];
+  // a が b より新しい(同じ時刻なら、答えありが勝ち → 答えの文字が大きい方が勝ち)。順番に関係なく同じ結果になる全順序。
+  const voteNewer = (a, b) => {
+    const x = Math.abs(a[0]), y = Math.abs(b[0]);
+    if (x !== y) return x > y;
+    if ((a[0] > 0) !== (b[0] > 0)) return a[0] > 0;
+    return a[1] > b[1];
+  };
   function cleanVotes(a) {
     const m = new Map();
     if (Array.isArray(a)) {
@@ -83,17 +104,35 @@ const TPLogic = (() => {
         if (!n) continue;
         const t = Math.sign(p[1]) * Math.min(Math.abs(Math.trunc(p[1])), Date.now() + FUTURE_MS);
         if (t === 0) continue;
+        const c = t < 0 ? 'g' : (CHOICES.includes(p[2]) ? p[2] : 'g'); // 取り消しの記録に答えは要らない
         const cur = m.get(n);
-        if (cur === undefined || Math.abs(t) > Math.abs(cur) || (Math.abs(t) === Math.abs(cur) && t > 0)) m.set(n, t);
+        if (!cur || voteNewer([t, c], cur)) m.set(n, [t, c]);
       }
     }
-    return [...m].sort((x, y) => byName(x[0], y[0]));
+    return [...m].sort((x, y) => byName(x[0], y[0])).map(([n, [t, c]]) => (c === 'g' ? [n, t] : [n, t, c]));
   }
   const voters = idea => (idea.v || []).filter(p => p[1] > 0).map(p => p[0]);
-  function setVote(v, name, on, now) {
+  // 名前 -> 答え('g'|'m'|'n')
+  const ballotMap = idea => new Map((idea.v || []).filter(p => p[1] > 0).map(p => [p[0], p[2] || 'g']));
+  // {g:[名前], m:[名前], n:[名前]}
+  function ballots(idea) {
+    const out = { g: [], m: [], n: [] };
+    for (const [n, c] of ballotMap(idea)) out[c].push(n);
+    return out;
+  }
+  // members: いまのメンバー全員の名前。all=全員が行く / split=行くと行かないが両方 / open=それ以外
+  function agreement(idea, members) {
+    const bm = ballotMap(idea), b = ballots(idea);
+    let tier = 'open';
+    if (members.length && members.every(n => bm.get(n) === 'g')) tier = 'all';
+    else if (b.g.length && b.n.length) tier = 'split';
+    return { tier, go: b.g.length, maybe: b.m.length, no: b.n.length, answered: bm.size };
+  }
+  function setVote(v, name, on, now, choice) {
     const old = (v || []).find(p => p[0] === name);
     const t = Math.max(now, old ? Math.abs(old[1]) + 1 : 0);
-    return cleanVotes((v || []).filter(p => p[0] !== name).concat([[name, on ? t : -t]]));
+    const c = CHOICES.includes(choice) ? choice : 'g';
+    return cleanVotes((v || []).filter(p => p[0] !== name).concat([on ? (c === 'g' ? [name, t] : [name, t, c]) : [name, -t]]));
   }
 
   // ---------- 検証・正規化 ----------
@@ -131,7 +170,7 @@ const TPLogic = (() => {
       const time = t && +t[1] < 24 && +t[2] < 60 ? t[1].padStart(2, '0') + ':' + t[2] : '';
       return {
         id, day, time, title: S(e.title, 100) || '（無題）', place: S(e.place, 150), mapQuery: S(e.mapQuery, 150), note: S(e.note, 500),
-        type: e.type === 'fixed' ? 'fixed' : 'free', by: S(e.by, 30), u: U(e.u),
+        type: e.type === 'fixed' ? 'fixed' : 'free', src: S(e.src, 80), by: S(e.by, 30), ed: S(e.ed, 30), u: U(e.u),
       };
     },
     ideas: (e, id) => {
@@ -143,7 +182,7 @@ const TPLogic = (() => {
         category: CATEGORIES.includes(e.category) ? e.category : 'other', costUSD: cost,
         duration: S(e.duration, 40), bestTime: S(e.bestTime, 80), tip: S(e.tip, 300),
         mapQuery: S(e.mapQuery, 150), link: safeUrl(e.link || e.sourceUrl), note: S(e.note, 500),
-        tags: cleanTags(e.tags), verified: e.verified === true, by: S(e.by, 30), v: cleanVotes(e.v), u: U(e.u),
+        tags: cleanTags(e.tags), verified: e.verified === true, by: S(e.by, 30), ed: S(e.ed, 30), v: cleanVotes(e.v), u: U(e.u),
       };
     },
     people: (e) => {
@@ -162,7 +201,7 @@ const TPLogic = (() => {
         shares = custom.length ? cleanNames(custom.map(p => p[0])) : shares;
       }
       if (split === 'equal') { custom = []; if (!shares.length) return null; } else shares = [];
-      return { id, title: S(e.title, 100) || '（無題）', cents: e.cents, payer, split, shares, custom, by: S(e.by, 30), u: U(e.u) };
+      return { id, title: S(e.title, 100) || '（無題）', cents: e.cents, payer, split, shares, custom, by: S(e.by, 30), ed: S(e.ed, 30), u: U(e.u) };
     },
     checks: (e, id) => {
       const group = S(e.group, 10);
@@ -177,7 +216,7 @@ const TPLogic = (() => {
     if (!id) return null;
     if (e.deleted === true) {
       const t = { id, deleted: true, u: U(e.u) };
-      if (kind === 'items' || kind === 'ideas' || kind === 'expenses') t.by = S(e.by, 30);
+      if (kind === 'items' || kind === 'ideas' || kind === 'expenses') { t.by = S(e.by, 30); t.ed = S(e.ed, 30); }
       if (kind === 'ideas') t.v = cleanVotes(e.v);
       return t;
     }
@@ -208,7 +247,8 @@ const TPLogic = (() => {
     for (const kind of Object.keys(defaults)) {
       const list = defaults[kind];
       const idx = new Map(state[kind].map((e, i) => [e.id, i]));
-      for (const d of list) {
+      for (const raw of list) {
+        const d = cleanOne(kind, raw) || raw; // 既定データも、保存するデータと同じ形にそろえる
         const i = idx.get(d.id);
         if (i === undefined) { idx.set(d.id, state[kind].length); state[kind].push(d); }
         else {
@@ -229,7 +269,7 @@ const TPLogic = (() => {
     costUSD: '費用', link: 'リンク', area: 'エリア', duration: '所要時間', bestTime: 'おすすめ時間', tip: 'ヒント',
     mapQuery: '地図', verified: '確認済み', cents: '金額', payer: '支払った人', split: '分け方', shares: '負担する人',
     custom: '個別の負担額', text: '内容', done: '完了', year: '年', rate: 'レート', name: '名前', group: '分類',
-    icon: 'アイコン', by: '作った人', tags: 'タグ',
+    icon: 'アイコン', by: '作った人', ed: '最後に直した人', src: 'もとの候補', tags: 'タグ',
   };
   function label(kind, e) {
     switch (kind) {
@@ -242,7 +282,7 @@ const TPLogic = (() => {
       default: return '年・為替レート';
     }
   }
-  const strip = e => { const c = Object.assign({}, e); delete c.u; delete c.v; delete c.by; return c; };
+  const strip = e => { const c = Object.assign({}, e); delete c.u; delete c.v; delete c.by; delete c.ed; return c; };
   // どちらが新しいか: 更新時刻 → 同じなら内容(作った人・投票は除く)の文字列で決める。誰がどの順で合体しても同じ結果になる。
   function pickNewer(l, r) {
     if (r.u > l.u) return r;
@@ -263,6 +303,11 @@ const TPLogic = (() => {
       const by = [l.by, r.by].filter(Boolean).sort()[0] || '';
       if (by !== (m.by || '')) m = Object.assign({}, m, { by });
     }
+    // 最後に直した人(ed)は、いちばん新しい編集をした人。同じ時刻なら名前の大きい方(順番によらず同じ結果)。
+    if ('ed' in l || 'ed' in r) {
+      const best = [[l.u, l.ed || ''], [r.u, r.ed || '']].sort((x, y) => y[0] - x[0] || byName(y[1], x[1]))[0][1];
+      if (best !== (m.ed || '')) m = Object.assign({}, m, { ed: best });
+    }
     // 投票は、名前ごとに新しい方を採用して合算(削除済みの記録にも残す)
     if (kind === 'ideas') m = Object.assign({}, m, { v: cleanVotes([...(l.v || []), ...(r.v || [])]) });
     return m;
@@ -271,10 +316,22 @@ const TPLogic = (() => {
     const keys = new Set([...Object.keys(l), ...Object.keys(m)]);
     const out = [];
     for (const k of keys) {
-      if (k === 'id' || k === 'u' || k === 'v' || k === 'yu' || k === 'ru') continue;
+      if (k === 'id' || k === 'u' || k === 'v' || k === 'yu' || k === 'ru' || k === 'ed') continue;
       if (stable(l[k]) !== stable(m[k])) out.push(FIELD_JP[k] || k);
     }
     return out;
+  }
+
+  // 投票の違い(誰が増えた・消えた・答えを変えた)
+  function voteDiff(a, b) {
+    const x = ballotMap(a), y = ballotMap(b);
+    const plus = [...y.keys()].filter(n => !x.has(n)), minus = [...x.keys()].filter(n => !y.has(n));
+    const changed = [...y.keys()].filter(n => x.has(n) && x.get(n) !== y.get(n));
+    const parts = [];
+    if (plus.length) parts.push('投票+ ' + plus.join('、'));
+    if (minus.length) parts.push('票の取り消し ' + minus.join('、'));
+    if (changed.length) parts.push('答えを変えた ' + changed.join('、'));
+    return { any: parts.length > 0, text: parts.join(' / ') };
   }
 
   // local と incoming(検証済み)を統合。local は変更しない。 { state, changes } を返す。
@@ -297,12 +354,9 @@ const TPLogic = (() => {
           const l = out[kind][i];
           const v = cleanVotes([...(l.v || []), ...r.v]);
           if (stable(v) === stable(l.v || [])) continue;
-          const before = new Set(voters(l)), after = new Set(voters({ v }));
+          const d = voteDiff(l, { v });
           out[kind][i] = Object.assign({}, l, { v });
-          const plus = [...after].filter(n => !before.has(n)), minus = [...before].filter(n => !after.has(n));
-          if (!l.deleted && (plus.length || minus.length)) {
-            changes.push({ kind, type: 'votes', id: r.id, label: label(kind, l), detail: (plus.length ? '投票+ ' + plus.join('、') : '') + (plus.length && minus.length ? ' / ' : '') + (minus.length ? '票の取り消し ' + minus.join('、') : '') });
-          }
+          if (!l.deleted && d.any) changes.push({ kind, type: 'votes', id: r.id, label: label(kind, l), detail: d.text });
           continue;
         }
         if (i === undefined) {
@@ -323,13 +377,11 @@ const TPLogic = (() => {
             changes.push({ kind, type: 'add', id: r.id, label: label(kind, m), detail: '' });
           } else {
             const f = diffFields(l, m);
-            const before = new Set(voters(l)), after = new Set(voters(m));
-            const plus = [...after].filter(n => !before.has(n)), minus = [...before].filter(n => !after.has(n));
-            if (!f.length && !plus.length && !minus.length) continue; // 見た目に変化がない(取り消しの記録だけ等)
+            const d = voteDiff(l, m);
+            if (!f.length && !d.any) continue; // 見た目に変化がない(取り消しの記録だけ等)
             const parts = [];
             if (f.length) parts.push(f.join('・') + 'が変わる');
-            if (plus.length) parts.push('投票+ ' + plus.join('、'));
-            if (minus.length) parts.push('票の取り消し ' + minus.join('、'));
+            if (d.any) parts.push(d.text);
             changes.push({ kind, type: f.length ? 'update' : 'votes', id: r.id, label: label(kind, m), detail: parts.join(' / ') });
           }
         } else if (!l.deleted && !r.deleted && stable(strip(l)) !== stable(strip(r))) {
@@ -494,7 +546,7 @@ const TPLogic = (() => {
   return {
     APP_ID, KINDS, CATEGORIES, CHECK_GROUPS, PROFILE_ICONS, IDEA_TAGS,
     parseMoney, fmtUSD, fmtJPY, safeUrl, mapUrl, dayDate, newId,
-    cleanVotes, voters, setVote, cleanOne, emptyState, sanitize, clone, seedMissing,
+    CHOICES, cleanVotes, voters, ballotMap, ballots, agreement, setVote, routeUrl, lineShareUrl, cleanOne, emptyState, sanitize, clone, seedMissing,
     merge, stable, splitEqual, expenseShares, summarize, settle, zeroSumGroups,
     stripForShare, encodeShare, decodeShare, toDoc, docKey,
   };

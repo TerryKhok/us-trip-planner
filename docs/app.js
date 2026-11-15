@@ -1,8 +1,8 @@
 'use strict';
-/* 旅行プランナー: 画面部分。データは端末の localStorage だけに保存。外部通信なし。 */
+/* 旅のしおり: 画面部分。データは端末の localStorage に保存。外部通信は、ライブ共有を設定したときの Supabase だけ。 */
 (() => {
   const L = TPLogic;
-  const KEY = { state: 'tp.state.v1', me: 'tp.me', tab: 'tp.tab', backup: 'tp.backup.v1', room: 'tp.room', backupJoin: 'tp.backup.join' };
+  const KEY = { state: 'tp.state.v1', me: 'tp.me', tab: 'tp.tab', backup: 'tp.backup.v1', room: 'tp.room', backupJoin: 'tp.backup.join', seen: 'tp.seen' };
   // ライブ共有の設定(config.js)。空ならこの端末だけで使う(従来どおり)
   const CFG = window.TP_CONFIG || {};
   const LIVE_ON = (() => {
@@ -12,19 +12,24 @@
       return !!CFG.supabaseAnonKey && (u.protocol === 'https:' || localOk);
     } catch (e) { return false; }
   })();
+  const IN_LINE = /\bLine\//i.test(navigator.userAgent || ''); // LINEアプリの中のブラウザ
+  const TRIP_NAME = 'アメリカ卒業旅行';
+  const COVER_ID = 'sf-006'; // 表紙の写真(ゴールデン・ゲート・ブリッジ)
   const MAX_PEOPLE = 10;
   const WD = ['日', '月', '火', '水', '木', '金', '土'];
   const CAT_JP = { food: '食事', sight: '観光', activity: '体験', shopping: '買い物', nature: '自然', nightlife: '夜遊び', transport: '移動', other: 'その他' };
+  const CAT_ICON = { food: 'utensils', sight: 'camera', activity: 'ticket', shopping: 'shopping-bag', nature: 'trees', nightlife: 'moon-star', transport: 'train-front', other: 'map-pin' };
   const CITY_JP = { 'San Francisco': 'サンフランシスコ', 'Los Angeles': 'ロサンゼルス', 'San Diego': 'サンディエゴ' };
   const CITY_EN = Object.fromEntries(Object.entries(CITY_JP).map(([k, v]) => [v, k]));
   const cityLabel = c => CITY_JP[c] || c;
   const KIND_JP = { meta: '年・為替レート', days: '都市', items: '旅程の予定', ideas: 'アイデア', people: 'プロフィール', expenses: '支払い', checks: 'チェックリスト' };
   const TYPE_JP = { add: '追加', update: '変更', delete: '削除', votes: '投票' };
+  const TABS = ['itinerary', 'ideas', 'budget', 'checks', 'share'];
 
   // ---- ツアーの日程（ユーザー提供の情報。航空便・時刻・ホテル名は載せない）----
   const DAY_CITY = ['サンフランシスコ', 'サンフランシスコ', 'サンフランシスコ', 'サンフランシスコ → ロサンゼルス',
     'ロサンゼルス', 'ロサンゼルス', 'ロサンゼルス', 'ロサンゼルス', 'ロサンゼルス', '日本'];
-  const FREE_NOTE = 'やりたいことは「アイデア」から追加できます';
+  const FREE_NOTE = 'やりたいことは「アイデア」から入れられます';
   const PLAN = [
     ['t01', 1, 'fixed', '日本を出発（同じ日にサンフランシスコへ到着）', '日付変更線のため同じ日に着きます'],
     ['t02', 1, 'fixed', 'サンフランシスコ 半日観光（ツアー）', ''],
@@ -76,11 +81,12 @@
     set(k, v) { try { localStorage.setItem(k, v); return true; } catch (e) { return false; } },
     del(k) { try { localStorage.removeItem(k); } catch (e) { /* 何もしない */ } },
   };
-  let state = null, me = '', tab = 'itinerary', ideasMsg = '', saveWarned = false;
+  let state = null, me = '', tab = 'itinerary', prevTab = 'itinerary', ideasMsg = '', saveWarned = false;
   let engine = null, applying = false, syncStatus = 'local', syncInfo = '', pendingRender = false;
-  let fCity = '', fCat = '', fTag = '';
+  let fCity = '', fCat = '', fTag = '', checkEdit = false;
+  let credits = {};
   const PRICE_ASOF = '2026年時点'; // 確認済みの金額を調べた年(データの注記による)
-  const TAG_MARK = { games: ['🎮', 'ゲーム'], movies: ['🎬', '映画'] };
+  const TAG_MARK = { games: ['gamepad-2', 'ゲーム'], movies: ['clapperboard', '映画'] };
 
   function load() {
     const raw = ls.get(KEY.state);
@@ -95,7 +101,7 @@
     L.seedMissing(state, defaults());
     me = (ls.get(KEY.me) || '').trim().slice(0, 30);
     const t = ls.get(KEY.tab);
-    if (['itinerary', 'ideas', 'budget', 'checks', 'share'].includes(t)) tab = t;
+    if (TABS.includes(t)) tab = t;
   }
   function save() {
     const ok = ls.set(KEY.state, JSON.stringify(state));
@@ -125,7 +131,20 @@
     }
     return el;
   }
-  const btn = (text, onclick, cls, extra) => h('button', Object.assign({ type: 'button', class: 'btn ' + (cls || ''), onclick }, extra), text);
+  // Lucide アイコン(index.html の中のスプライトを参照)
+  const SVGNS = 'http://www.w3.org/2000/svg';
+  function ic(name, cls) {
+    const s = document.createElementNS(SVGNS, 'svg');
+    s.setAttribute('class', 'ic' + (cls ? ' ' + cls : ''));
+    s.setAttribute('aria-hidden', 'true');
+    s.setAttribute('focusable', 'false');
+    const u = document.createElementNS(SVGNS, 'use');
+    u.setAttribute('href', '#i-' + name);
+    s.append(u);
+    return s;
+  }
+  const btn = (text, onclick, cls, extra, icon) => h('button', Object.assign({ type: 'button', class: 'btn ' + (cls || ''), onclick }, extra), icon ? ic(icon) : null, text);
+  const iconBtn = (icon, label, onclick, cls) => h('button', { type: 'button', class: 'btn icon ' + (cls || ''), 'aria-label': label, title: label, onclick }, ic(icon));
   const field = (label, input, hint) => h('label', { class: 'f' }, h('span', { text: label }), input, hint ? h('small', { class: 'hint', text: hint }) : null);
   const range = (a, b) => Array.from({ length: b - a + 1 }, (_, i) => a + i);
 
@@ -133,7 +152,7 @@
     const box = document.getElementById('toast');
     const el = h('div', { text: msg });
     box.append(el);
-    setTimeout(() => el.remove(), 4500);
+    setTimeout(() => el.remove(), 4800);
   }
 
   function modal(title, body, actions) {
@@ -158,19 +177,33 @@
     });
   }
   const confirmDlg = (msg, okLabel, danger) => modal('確認', h('p', { text: msg }), [
-    { label: 'キャンセル', value: false },
+    { label: 'やめる', value: false },
     { label: okLabel || 'OK', cls: 'btn ' + (danger ? 'danger' : 'primary'), value: true },
   ]).then(v => v === true);
+
+  // ---- 時間の言い方(「2時間前」など) ----
+  function ago(ms) {
+    if (!ms) return '';
+    const s = Math.max(0, (Date.now() - ms) / 1000);
+    if (s < 60) return 'たった今';
+    if (s < 3600) return Math.floor(s / 60) + '分前';
+    if (s < 86400) return Math.floor(s / 3600) + '時間前';
+    if (s < 7 * 86400) return Math.floor(s / 86400) + '日前';
+    const d = new Date(ms);
+    return (d.getMonth() + 1) + '/' + d.getDate();
+  }
 
   // ---- データ操作 ----
   const live = kind => state[kind].filter(e => !e.deleted);
   const livePeople = () => live('people').map(p => p.name).sort();
+  const HAS_ED = ['items', 'ideas', 'expenses'];
   function upsert(kind, obj) {
     const c = L.cleanOne(kind, obj);
     if (!c) return false;
     const arr = state[kind];
     const i = arr.findIndex(x => x.id === c.id);
     c.u = Math.max(Date.now(), i >= 0 ? arr[i].u + 1 : 0);
+    if (HAS_ED.includes(kind) && me) c.ed = me; // 最後に直した人(いちばん新しい編集の人)
     if (i >= 0) arr[i] = c; else arr.push(c);
     save(); render();
     return true;
@@ -179,7 +212,7 @@
     const arr = state[kind];
     const i = arr.findIndex(x => x.id === id);
     if (i < 0) return;
-    arr[i] = L.cleanOne(kind, { id, deleted: true, u: Math.max(Date.now(), arr[i].u + 1), by: arr[i].by, v: arr[i].v });
+    arr[i] = L.cleanOne(kind, { id, deleted: true, u: Math.max(Date.now(), arr[i].u + 1), by: arr[i].by, ed: me || arr[i].ed, v: arr[i].v });
     save(); render();
   }
   function setMeta(changes) {
@@ -194,26 +227,27 @@
   const who = name => (profile(name) ? profile(name).icon + ' ' : '') + name;
   function setMe(name) { me = name; ls.set(KEY.me, name); render(); }
   function normalizeMe() { if (me && !profile(me)) { me = ''; ls.set(KEY.me, ''); } }
-  function chooseProfile(switchTo) {
+  function chooseProfile(switchTo, welcome) {
     let icon = L.PROFILE_ICONS[0];
     const name = h('input', { type: 'text', maxlength: 30, placeholder: '例: ゆうた', autocomplete: 'off', 'aria-label': '名前' });
-    const iconBtns = L.PROFILE_ICONS.map(ic => h('button', {
-      type: 'button', class: 'icon-btn' + (ic === icon ? ' on' : ''), 'aria-pressed': String(ic === icon),
-      onclick: () => { icon = ic; iconBtns.forEach(b => { const on = b.textContent === ic; b.classList.toggle('on', on); b.setAttribute('aria-pressed', String(on)); }); },
-    }, ic));
-    return modal(switchTo ? 'あなたの名前は？' : 'メンバーを追加', finish => {
+    const iconBtns = L.PROFILE_ICONS.map(ic2 => h('button', {
+      type: 'button', class: 'icon-btn' + (ic2 === icon ? ' on' : ''), 'aria-pressed': String(ic2 === icon), 'aria-label': 'アイコン ' + ic2,
+      onclick: () => { icon = ic2; iconBtns.forEach(b => { const on = b.textContent === ic2; b.classList.toggle('on', on); b.setAttribute('aria-pressed', String(on)); }); },
+    }, ic2));
+    return modal(welcome ? 'ようこそ、旅のしおりへ' : switchTo ? 'あなたの名前は？' : 'メンバーを追加', finish => {
       const existing = live('people').slice().sort((x, y) => (x.name < y.name ? -1 : 1));
       return h('div', null,
-        switchTo && existing.length ? h('div', null, h('h3', { text: 'いるプロフィールから選ぶ' }),
+        welcome ? h('p', { class: 'lead', text: '友だちとは、LINEで送るリンクで一緒に使えます。まずは、名前とアイコンを決めましょう。' }) : null,
+        switchTo && existing.length ? h('div', null, h('h3', { text: 'いるメンバーから選ぶ' }),
           h('div', { class: 'chips' }, existing.map(p => h('button', { type: 'button', class: 'btn small' + (p.name === me ? ' primary' : ''), onclick: () => { setMe(p.name); finish(true); } }, p.icon + ' ' + p.name)))) : null,
-        h('h3', { text: switchTo ? '新しく作る' : '名前とアイコン' }),
+        h('h3', { text: switchTo && existing.length ? '新しく作る' : '名前とアイコン' }),
         field('名前', name),
         h('p', { class: 'small', text: 'アイコンを選ぶ' }), h('div', { class: 'icons' }, iconBtns),
-        h('p', { class: 'hint', text: 'パスワードはありません。だれでも好きな名前を選べます（友だち同士で使うためのもので、なりすましを防ぐ仕組みではありません）。同じ名前を入れると、アイコンだけ更新されます。' }));
+        h('p', { class: 'hint', text: 'パスワードはなく、だれでも好きな名前を選べます。友だち同士で「だれが決めたか」が分かるための仕組みで、なりすまし防止ではありません。同じ名前を入れると、アイコンだけ更新されます。' }));
     }, [
-      { label: 'キャンセル', value: false },
+      { label: welcome ? 'あとで' : 'やめる', value: false },
       {
-        label: switchTo ? '作って使う' : '追加', cls: 'btn primary', value: true,
+        label: welcome ? 'はじめる' : switchTo ? '決める' : '追加する', cls: 'btn primary', value: true,
         onClick: setErr => {
           const n = name.value.trim().slice(0, 30);
           if (!n) { setErr('名前を入れてください'); return false; }
@@ -233,151 +267,230 @@
     const d = L.dayDate(state.meta.year, n);
     return n + '日目 ' + d.m + '/' + d.d + '(' + WD[d.w] + ')';
   };
+  const dateLabel = n => { const d = L.dayDate(state.meta.year, n); return d.m + '/' + d.d + '（' + WD[d.w] + '）'; };
   const dayCity = n => { const d = state.days.find(x => x.id === 'd' + n); return d && !d.deleted ? d.city : ''; };
   const rate = () => state.meta.rate;
   const money = cents => L.fmtUSD(cents) + (rate() ? '（約' + L.fmtJPY(cents, rate()) + '）' : '');
-  const mapLink = q => h('a', { href: L.mapUrl(q), target: '_blank', rel: 'noopener noreferrer' }, '🗺 地図');
-  const extLink = (url, text) => { const u = L.safeUrl(url); return u ? h('a', { href: u, target: '_blank', rel: 'noopener noreferrer' }, text) : null; };
+  // ドルは大きく、円は小さく(文の流れをじゃましない)
+  const moneyEl = cents => h('span', { class: 'money' }, h('span', { class: 'usd', text: L.fmtUSD(cents) }), rate() ? h('span', { class: 'jpy', text: '（約' + L.fmtJPY(cents, rate()) + '）' }) : null);
+  const extLink = (url, text, icon) => { const u = L.safeUrl(url); return u ? h('a', { class: 'lnk', href: u, target: '_blank', rel: 'noopener noreferrer' }, icon ? ic(icon) : null, text) : null; };
+  const mapLink = (q, text) => h('a', { class: 'lnk', href: L.mapUrl(q), target: '_blank', rel: 'noopener noreferrer' }, ic('map-pin'), text || '地図で見る');
   const centsToInput = c => Math.floor(c / 100) + '.' + String(c % 100).padStart(2, '0');
+
+  // 「だれが・いつ」を文にする。作った人と、いちばん最後に直した人は別々に出す
+  function byLine(e, fallbackCreator) {
+    const parts = [];
+    if (e.by) parts.push(who(e.by) + 'さんが追加'); else if (fallbackCreator) parts.push(fallbackCreator);
+    if (e.ed && e.ed !== e.by) parts.push(who(e.ed) + 'さんが直した');
+    const t = ago(e.u);
+    if (t) parts.push(t);
+    return parts.join(' · ');
+  }
+
+  // 写真(Wikimedia Commons の自由な画像)。クレジットを必ず表示する。写真がないときは色のブロックにする。
+  function creditLine(id) {
+    const c = credits[id];
+    if (!c) return null;
+    return h('figcaption', { class: 'cr' },
+      c.caption ? h('span', { class: 'cap', text: c.caption }) : null, // 別の(近くの・姉妹の)場所の写真のときの注記
+      h('span', null, '写真: ' + (c.author || '作者不明') + ' / ',
+        c.licenseUrl ? h('a', { href: c.licenseUrl, target: '_blank', rel: 'noopener noreferrer' }, c.license) : c.license,
+        ' / ', h('a', { href: c.sourceUrl, target: '_blank', rel: 'noopener noreferrer' }, 'Commonsの写真ページ'), c.modified ? '（大きさを変更）' : ''));
+  }
+  function photoBlock(id, title, category, city) {
+    const blank = () => h('div', { class: 'ph ph-none', 'aria-hidden': 'true' }, ic(CAT_ICON[category] || 'map-pin', 'big'), h('span', { text: cityLabel(city || '') }));
+    if (!credits[id]) return blank();
+    const img = h('img', { src: 'img/' + id + '.jpg', alt: title + 'の写真', loading: 'lazy', decoding: 'async', width: 640, height: 360 });
+    const fig = h('figure', { class: 'ph' }, img, creditLine(id));
+    img.addEventListener('error', () => fig.replaceWith(blank())); // 壊れた画像のマークは出さない
+    return fig;
+  }
 
   // ================= 旅程 =================
   function viewItinerary() {
-    const root = h('div');
+    const root = h('div', { class: 'stack' });
+    root.append(h('datalist', { id: 'cities' }, h('option', { value: 'サンフランシスコ' }), h('option', { value: 'ロサンゼルス' })));
+    for (let n = 1; n <= 10; n++) root.append(dayCard(n));
     const yearIn = h('input', {
       id: 'yr', type: 'number', min: 2000, max: 2100, value: state.meta.year,
       onchange: e => { const y = parseInt(e.target.value, 10); if (y >= 2000 && y <= 2100) setMeta({ year: y }); else { toast('年は2000〜2100で入れてください'); render(); } },
     });
-    const freeDays = range(1, 10).filter(n => live('items').some(i => i.day === 'd' + n && i.type === 'free'))
-      .map(n => { const d = L.dayDate(state.meta.year, n); return d.m + '/' + d.d; });
-    root.append(h('section', { class: 'card' },
-      h('div', { class: 'row' }, h('label', { for: 'yr' }, '旅行の年'), h('div', { class: 'grow' }, yearIn)),
-      h('p', { class: 'hint', text: '1/31〜2/9 の10日間。年は' + state.meta.year + '年（1/31は' + WD[L.dayDate(state.meta.year, 1).w] + '曜）です。' }),
-      h('p', { class: 'hint', text: '自由時間がある日: ' + (freeDays.join('・') || 'なし') + '　※ツアーの予定は仮入力です。直してかまいません。' }),
-      h('p', { class: 'hint', text: '友だちの変更は自動では届きません。合わせるには共有からリンクかファイルを送ります。' })));
-    root.append(h('datalist', { id: 'cities' }, h('option', { value: 'サンフランシスコ' }), h('option', { value: 'ロサンゼルス' })));
-    for (let n = 1; n <= 10; n++) root.append(dayCard(n));
+    root.append(h('section', { class: 'card soft' },
+      h('div', { class: 'row' }, h('label', { for: 'yr', class: 'grow-0', text: '旅行の年' }), h('div', { class: 'grow' }, yearIn)),
+      h('p', { class: 'hint', text: '日付がちがうときは、ここで年を直せます（いまは' + state.meta.year + '年。1/31は' + WD[L.dayDate(state.meta.year, 1).w] + '曜です）。' })));
+    root.append(footerLinks());
     return root;
+  }
+  function footerLinks() {
+    return h('p', { class: 'foot' }, h('button', { type: 'button', class: 'linkbtn', onclick: () => go('about') }, ic('info'), 'このサイトについて'));
   }
   function dayCard(n) {
     const id = 'd' + n;
     const items = live('items').filter(i => i.day === id)
       .sort((a, b) => (a.time || '99:99').localeCompare(b.time || '99:99') || a.id.localeCompare(b.id));
+    const hasFree = items.some(i => i.type === 'free');
+    const stops = items.map(i => i.mapQuery || i.place).filter(Boolean);
+    const route = L.routeUrl(stops);
     const city = h('input', {
       class: 'city', type: 'text', list: 'cities', maxlength: 40, value: dayCity(n), placeholder: '都市（未定）', 'aria-label': n + '日目の都市',
       onchange: e => upsert('days', { id, city: e.target.value }),
     });
-    const list = h('ul', { class: 'plain' }, items.map(it => h('li', { class: 'item' },
-      h('div', { class: 'time', text: it.time || '--:--' }),
-      h('div', null,
-        h('div', { class: 't' }, h('span', { class: 'badge ' + it.type, text: it.type === 'fixed' ? 'ツアー' : '自由' }), it.title),
-        (it.place || it.mapQuery) ? h('div', { class: 'p' }, it.place ? it.place + ' ' : '', mapLink(it.mapQuery || it.place)) : null,
-        it.note ? h('div', { class: 'n', text: it.note }) : null,
-        it.by ? h('div', { class: 'by', text: who(it.by) + 'さんが追加' }) : null),
-      h('div', { class: 'ops' },
-        btn('編集', () => itemForm(it, id), 'small', { 'aria-label': it.title + 'を編集' }),
-        btn('削除', async () => { if (await confirmDlg('「' + it.title + '」を削除しますか？', '削除', true)) removeEntity('items', it.id); }, 'small danger', { 'aria-label': it.title + 'を削除' })))));
+    const foot = h('div', { class: 'day-foot' },
+      route ? h('a', { class: 'btn soft wide', href: route, target: '_blank', rel: 'noopener noreferrer' }, ic('route'), 'この日の順路を地図で開く')
+        : (stops.length === 1 ? h('p', { class: 'one-stop' }, mapLink(stops[0], 'この日の場所を地図で見る')) : null),
+      h('div', { class: 'row gap' },
+        btn('予定を足す', () => needProfile().then(m => m && itemForm(null, id)), '', null, 'plus'),
+        btn('アイデアから入れる', () => go('ideas'), 'ghost', null, 'lightbulb')));
     return h('section', { class: 'card day', 'aria-label': dayLabel(n) },
-      h('div', { class: 'row between day-head' }, h('h3', { text: dayLabel(n) }), city),
-      list,
-      h('div', { class: 'actions' }, btn('＋ 予定を追加', () => needProfile().then(m => m && itemForm(null, id)), 'small')));
+      h('div', { class: 'day-head' },
+        h('div', { class: 'day-no' }, h('span', { class: 'n', text: String(n) }), h('span', { class: 'u', text: '日目' })),
+        h('div', { class: 'day-meta' }, h('span', { class: 'date', text: dateLabel(n) }), !items.length ? h('span', { class: 'chip', text: '予定なし' }) : hasFree ? h('span', { class: 'chip free', text: '自由時間あり' }) : h('span', { class: 'chip fixed', text: 'ツアー中心' }))),
+      city,
+      items.length ? h('ul', { class: 'plain items' }, items.map(itemRow))
+        : h('div', { class: 'empty' }, h('p', { class: 'empty-t', text: 'この日はまだ空いています' }), h('p', { class: 'hint', text: 'アイデアから入れるか、自分で足せます。' })),
+      foot);
+  }
+  function itemRow(it) {
+    const idea = it.src ? state.ideas.find(i => i.id === it.src && !i.deleted) : null;
+    const q = it.mapQuery || it.place;
+    const line = byLine(it);
+    return h('li', { class: 'item ' + it.type },
+      it.src && credits[it.src] ? photoBlock(it.src, it.title, idea ? idea.category : 'other', idea ? idea.city : '') : null,
+      h('div', { class: 'item-main' },
+        h('div', { class: 'item-top' }, h('span', { class: 'time', text: it.time || '時間は未定' }), h('span', { class: 'chip ' + it.type, text: it.type === 'fixed' ? 'ツアー' : '自由時間' })),
+        h('h4', { class: 'item-title', text: it.title }),
+        (it.place || q) ? h('p', { class: 'place' }, it.place ? it.place + '　' : '', q ? mapLink(q) : null) : null,
+        it.note ? h('p', { class: 'note', text: it.note }) : null,
+        line ? h('p', { class: 'by', text: line }) : null),
+      h('div', { class: 'item-ops' },
+        iconBtn('pencil', it.title + 'を直す', () => itemForm(it, it.day)),
+        iconBtn('trash', it.title + 'を消す', async () => { if (await confirmDlg('「' + it.title + '」を消しますか？', '消す', true)) removeEntity('items', it.id); }, 'danger')));
   }
   function itemForm(item, dayId) {
-    const it = item || { id: L.newId('i'), day: dayId, time: '', title: '', place: '', mapQuery: '', note: '', type: 'free', by: me };
+    const it = item || { id: L.newId('i'), day: dayId, time: '', title: '', place: '', mapQuery: '', note: '', type: 'free', src: '', by: me };
     const day = h('select', null, range(1, 10).map(n => h('option', { value: 'd' + n, selected: 'd' + n === it.day, text: dayLabel(n) })));
     const time = h('input', { type: 'time', value: it.time });
     const type = h('select', null, h('option', { value: 'free', selected: it.type === 'free', text: '自由時間' }), h('option', { value: 'fixed', selected: it.type === 'fixed', text: 'ツアーの予定' }));
     const title = h('input', { type: 'text', maxlength: 100, value: it.title, required: true });
     const place = h('input', { type: 'text', maxlength: 150, value: it.place, placeholder: '例: サンタモニカ・ピア' });
     const note = h('textarea', { maxlength: 500, value: it.note });
-    return modal(item ? '予定を編集' : '予定を追加', h('div', null,
-      field('日', day), field('時間（空でもOK）', time), field('種類', type), field('タイトル', title),
+    return modal(item ? '予定を直す' : '予定を足す', h('div', null,
+      field('日', day), field('時間（わからなければ空でOK）', time), field('種類', type), field('タイトル', title),
       field('場所（地図リンクに使います）', place, '住所や予約情報は入れないでください'), field('メモ', note)), [
-      { label: 'キャンセル', value: false },
+      { label: 'やめる', value: false },
       {
-        label: '保存', cls: 'btn primary', value: true,
+        label: '保存する', cls: 'btn primary', value: true,
         onClick: setErr => {
           if (!title.value.trim()) { setErr('タイトルを入れてください'); return false; }
-          upsert('items', { id: it.id, day: day.value, time: time.value, title: title.value, place: place.value, mapQuery: (place.value.trim() === it.place && it.mapQuery) || '', note: note.value, type: type.value, by: it.by });
+          upsert('items', { id: it.id, day: day.value, time: time.value, title: title.value, place: place.value, mapQuery: (place.value.trim() === it.place && it.mapQuery) || '', note: note.value, type: type.value, src: it.src || '', by: it.by });
         },
       },
     ]);
   }
 
   // ================= アイデア =================
+  const CHOICES = [['g', '行く', 'circle-check'], ['m', '迷う', 'help'], ['n', '行かない', 'circle-x']];
+  const TIER_ORDER = { all: 0, split: 1, open: 2 };
+  const addedDays = idea => live('items').filter(i => i.src === idea.id).map(i => i.day).filter((d, k, a) => a.indexOf(d) === k).sort((a, b) => Number(a.slice(1)) - Number(b.slice(1)));
+  // まだ決まっていない候補: 答えが出ていて、全員が行くではなく、まだ旅程に入っていないもの
+  const undecidedCount = () => {
+    const members = livePeople();
+    return live('ideas').filter(i => { const a = L.agreement(i, members); return a.answered > 0 && a.tier !== 'all' && !addedDays(i).length; }).length;
+  };
   function viewIdeas() {
-    const root = h('div');
-    const all = live('ideas');
+    const root = h('div', { class: 'stack' });
+    const all = live('ideas'), members = livePeople();
     const cities = [...new Set(all.map(i => i.city).filter(Boolean))].sort();
     const citySel = h('select', { 'aria-label': '都市で絞り込む', onchange: e => { fCity = e.target.value; render(); } },
       h('option', { value: '', text: 'すべての都市' }), cities.map(c => h('option', { value: c, selected: c === fCity, text: cityLabel(c) })));
     const catSel = h('select', { 'aria-label': 'カテゴリで絞り込む', onchange: e => { fCat = e.target.value; render(); } },
       h('option', { value: '', text: 'すべてのカテゴリ' }), L.CATEGORIES.map(c => h('option', { value: c, selected: c === fCat, text: CAT_JP[c] })));
     const seg = h('div', { class: 'seg', role: 'group', 'aria-label': 'ジャンルで絞り込む' },
-      [['', '全部'], ['games', '🎮 ゲーム'], ['movies', '🎬 映画']].map(([v, text]) => h('button', {
+      [['', '全部', null], ['games', 'ゲーム', 'gamepad-2'], ['movies', '映画', 'clapperboard']].map(([v, text, icon]) => h('button', {
         type: 'button', class: 'seg-btn' + (fTag === v ? ' on' : ''), 'aria-pressed': String(fTag === v), onclick: () => { fTag = v; render(); },
-      }, text)));
-    root.append(h('div', { class: 'card' },
+      }, icon ? ic(icon) : null, text)));
+    const rows = all.map((idea, i) => ({ idea, i, ag: L.agreement(idea, members) }))
+      .filter(({ idea }) => (!fCity || idea.city === fCity) && (!fCat || idea.category === fCat) && (!fTag || (idea.tags || []).includes(fTag)))
+      .sort((a, b) => TIER_ORDER[a.ag.tier] - TIER_ORDER[b.ag.tier] || b.ag.go - a.ag.go || a.i - b.i);
+    const nAll = rows.filter(r => r.ag.tier === 'all').length, nSplit = rows.filter(r => r.ag.tier === 'split').length;
+    root.append(h('section', { class: 'card tools' },
+      h('h2', { class: 'sec', text: '行きたい場所を、みんなで決めよう' }),
+      h('p', { class: 'lead', text: me ? who(me) + ' として答えています。「行く」「迷う」「行かない」を選んでね。' : '名前を決めると、「行く」「迷う」「行かない」で答えられます。' }),
       seg,
       h('div', { class: 'filters' }, citySel, catSel),
-      h('div', { class: 'actions' }, btn('＋ アイデアを追加', () => needProfile().then(m => m && ideaForm(null)), 'primary')),
-      h('p', { class: 'hint', text: me ? '投票する人: ' + who(me) + '（1つのアイデアに1人1票）' : '投票するときに名前とアイコンを選びます（1つのアイデアに1人1票）' }),
+      h('p', { class: 'sum', text: rows.length + '件' + (nAll || nSplit ? '　・　全員が行く ' + nAll + '　・　意見が割れている ' + nSplit : '') }),
+      h('div', { class: 'row gap' }, btn('候補を足す', () => needProfile().then(m => m && ideaForm(null)), 'soft', null, 'plus')),
       h('p', { class: 'hint', text: '金額は目安です。「目安・未確認」は、まだ確認していない金額です。' })));
     if (ideasMsg && !all.length) root.append(h('p', { class: 'hint', text: ideasMsg }));
-    const list = all.map((idea, i) => ({ idea, i })).filter(({ idea }) => (!fCity || idea.city === fCity) && (!fCat || idea.category === fCat) && (!fTag || (idea.tags || []).includes(fTag)))
-      .sort((a, b) => L.voters(b.idea).length - L.voters(a.idea).length || a.i - b.i);
-    if (!list.length) root.append(h('p', { class: 'hint', text: 'アイデアはまだありません。' }));
-    list.forEach(({ idea }) => root.append(ideaCard(idea)));
+    if (!rows.length) root.append(h('div', { class: 'card empty' }, h('p', { class: 'empty-t', text: '条件に合う候補がありません' }), h('p', { class: 'hint', text: '絞り込みを「全部」に戻してみてください。' })));
+    rows.forEach(({ idea, ag }) => root.append(ideaCard(idea, ag, members)));
+    root.append(footerLinks());
     return root;
   }
-  function ideaCard(idea) {
-    const vs = L.voters(idea);
-    const mine = me && vs.includes(me);
+  function ideaCard(idea, ag, members) {
+    const mine = me ? L.ballotMap(idea).get(me) || null : null;
+    const bl = L.ballots(idea);
     const cost = idea.costUSD == null ? '費用: わからない'
       : idea.costUSD === 0 ? '無料'
         : '約$' + idea.costUSD + (rate() ? '（約' + L.fmtJPY(Math.round(idea.costUSD * 100), rate()) + '）' : '');
     const estimate = !idea.verified && (idea.costUSD != null || /ドル/.test((idea.note || '') + (idea.tip || ''))); // 本文にドルの金額があるときも
     const asOf = idea.verified && idea.costUSD != null; // 確認済みの金額も、調べた年を出す
-    const link = extLink(idea.link, '情報元');
+    const days = addedDays(idea);
+    const vote = h('div', { class: 'vote', role: 'group', 'aria-label': idea.title + 'に行くか答える' },
+      CHOICES.map(([c, label, icon]) => h('button', { type: 'button', class: 'vbtn v-' + c + (mine === c ? ' on' : ''), 'aria-pressed': String(mine === c), onclick: () => setAnswer(idea.id, c) }, ic(icon), label)));
+    const faces = h('div', { class: 'faces' }, CHOICES.filter(([c]) => bl[c].length).map(([c, label]) =>
+      h('p', { class: 'face-row' }, h('span', { class: 'fl v-' + c, text: label }), bl[c].map(n => h('span', { class: 'face', text: who(n) })))));
+    const verdict = ag.tier === 'all' ? h('p', { class: 'verdict ok' }, ic('check'), '全員が行く')
+      : ag.tier === 'split' ? h('p', { class: 'verdict split' }, ic('info'), '意見が割れています')
+        : h('p', { class: 'verdict' }, ag.answered ? ag.answered + '人が答えました（メンバー' + members.length + '人）' : 'まだだれも答えていません');
+    const line = byLine(idea, '下調べで追加');
     return h('article', { class: 'card idea' },
-      h('div', { class: 'row between' }, h('h3', { text: idea.title }),
-        btn('👍 ' + vs.length, () => toggleVote(idea.id), 'vote' + (mine ? ' on' : ''), { 'aria-pressed': String(!!mine), 'aria-label': idea.title + 'に投票（現在' + vs.length + '票）' })),
-      h('div', { class: 'tags' },
-        idea.city ? h('span', { class: 'tag', text: cityLabel(idea.city) }) : null,
-        idea.area ? h('span', { class: 'tag', text: idea.area }) : null,
-        h('span', { class: 'tag', text: CAT_JP[idea.category] }),
-        (idea.tags || []).filter(t => TAG_MARK[t]).map(t => h('span', { class: 'tag mark', title: TAG_MARK[t][1], 'aria-label': TAG_MARK[t][1] }, TAG_MARK[t][0])),
-        h('span', { class: 'tag', text: cost }),
-        idea.duration ? h('span', { class: 'tag', text: idea.duration }) : null,
-        estimate ? h('span', { class: 'tag warn', text: '目安・未確認' }) : null,
-        asOf ? h('span', { class: 'tag', text: PRICE_ASOF }) : null),
-      idea.bestTime ? h('p', { class: 'small', text: 'おすすめ: ' + idea.bestTime }) : null,
-      idea.tip ? h('p', { class: 'small', text: 'ヒント: ' + idea.tip }) : null,
-      idea.note ? h('p', { text: idea.note }) : null,
-      h('p', { class: 'small', text: idea.by ? who(idea.by) + 'さんが追加' : '下調べで追加' }),
-      vs.length ? h('p', { class: 'small', text: '投票した人: ' + vs.map(who).join('、') }) : null,
-      h('div', { class: 'row' }, mapLink(idea.mapQuery || (idea.title + ' ' + idea.city).trim()), link),
-      h('div', { class: 'actions' },
-        btn('旅程に追加', () => needProfile().then(m => m && addToDay(idea)), 'small primary'),
-        btn('編集', () => ideaForm(idea), 'small', { 'aria-label': idea.title + 'を編集' }),
-        btn('削除', async () => { if (await confirmDlg('「' + idea.title + '」を削除しますか？', '削除', true)) removeEntity('ideas', idea.id); }, 'small danger', { 'aria-label': idea.title + 'を削除' })));
+      photoBlock(idea.id, idea.title, idea.category, idea.city),
+      h('div', { class: 'idea-body' },
+        h('div', { class: 'idea-top' },
+          h('p', { class: 'kicker' }, ic(CAT_ICON[idea.category] || 'map-pin'), [cityLabel(idea.city), idea.area].filter(Boolean).join(' ・ ')),
+          h('div', { class: 'idea-ops' },
+            iconBtn('pencil', idea.title + 'を直す', () => ideaForm(idea)),
+            iconBtn('trash', idea.title + 'を消す', async () => { if (await confirmDlg('「' + idea.title + '」を消しますか？', '消す', true)) removeEntity('ideas', idea.id); }, 'danger'))),
+        h('h3', { class: 'idea-title', text: idea.title }),
+        h('p', { class: 'chips' },
+          h('span', { class: 'chip', text: CAT_JP[idea.category] }),
+          (idea.tags || []).filter(t => TAG_MARK[t]).map(t => h('span', { class: 'chip tag' }, ic(TAG_MARK[t][0]), TAG_MARK[t][1])),
+          h('span', { class: 'chip', text: cost }),
+          idea.duration ? h('span', { class: 'chip', text: idea.duration }) : null,
+          estimate ? h('span', { class: 'chip warn', text: '目安・未確認' }) : null,
+          asOf ? h('span', { class: 'chip', text: PRICE_ASOF }) : null),
+        idea.note ? h('p', { class: 'note', text: idea.note }) : null,
+        idea.bestTime ? h('p', { class: 'small', text: 'おすすめの時間: ' + idea.bestTime }) : null,
+        idea.tip ? h('p', { class: 'small', text: 'ヒント: ' + idea.tip }) : null,
+        vote, faces, verdict,
+        h('div', { class: 'row gap acts' },
+          btn('この日に入れる', () => needProfile().then(m => m && addToDay(idea)), 'primary', null, 'plus'),
+          days.length ? h('span', { class: 'chip free', text: days.map(d => d.slice(1) + '日目').join('・') + 'に入っています' }) : null),
+        h('div', { class: 'row gap links' },
+          mapLink(idea.mapQuery || (idea.title + ' ' + idea.city).trim()),
+          extLink(idea.link, '情報元を見る', 'external-link')),
+        line ? h('p', { class: 'by', text: line }) : null));
   }
-  async function toggleVote(id) {
+  async function setAnswer(id, choice) {
     if (!(await needProfile())) return;
     const idea = state.ideas.find(i => i.id === id);
     if (!idea || idea.deleted) return;
-    idea.v = L.setVote(idea.v, me, !L.voters(idea).includes(me), Date.now());
+    const on = L.ballotMap(idea).get(me) !== choice; // 同じ答えをもう一度押すと取り消し
+    idea.v = L.setVote(idea.v, me, on, Date.now(), choice);
     save(); render();
   }
   function addToDay(idea) {
-    const day = h('select', null, range(1, 10).map(n => h('option', { value: 'd' + n, selected: n === 2, text: dayLabel(n) + (dayCity(n) ? ' ' + dayCity(n) : '') })));
+    const def = idea.city === 'Los Angeles' ? 5 : 2;
+    const day = h('select', null, range(1, 10).map(n => h('option', { value: 'd' + n, selected: n === def, text: dayLabel(n) + (dayCity(n) ? ' ' + dayCity(n) : '') })));
     const time = h('input', { type: 'time' });
-    return modal('旅程に追加', h('div', null, h('p', { text: idea.title }), field('日', day), field('時間（空でもOK）', time)), [
-      { label: 'キャンセル', value: false },
+    return modal('この日に入れる', h('div', null, h('p', { class: 'lead', text: idea.title }), field('日', day), field('時間（わからなければ空でOK）', time)), [
+      { label: 'やめる', value: false },
       {
-        label: '追加', cls: 'btn primary', value: true,
+        label: '旅程に入れる', cls: 'btn primary', value: true,
         onClick: () => {
-          upsert('items', { id: L.newId('i'), day: day.value, time: time.value, title: idea.title, place: idea.area ? idea.area : '', mapQuery: idea.mapQuery || (idea.title + ' ' + idea.city).trim(), note: idea.note, type: 'free', by: me });
-          toast(dayLabel(Number(day.value.slice(1))) + ' に追加しました');
+          upsert('items', { id: L.newId('i'), day: day.value, time: time.value, title: idea.title, place: idea.area ? idea.area : '', mapQuery: idea.mapQuery || (idea.title + ' ' + idea.city).trim(), note: idea.note, type: 'free', src: idea.id, by: me });
+          toast(dayLabel(Number(day.value.slice(1))) + ' に入れました');
         },
       },
     ]);
@@ -390,12 +503,12 @@
     const cost = h('input', { type: 'text', inputmode: 'decimal', value: it.costUSD == null ? '' : String(it.costUSD), placeholder: '例: 25（わからなければ空でOK）' });
     const link = h('input', { type: 'url', maxlength: 500, value: it.link, placeholder: '例: 店の公式サイト' });
     const note = h('textarea', { maxlength: 500, value: it.note });
-    return modal(idea ? 'アイデアを編集' : 'アイデアを追加', h('div', null,
+    return modal(idea ? '候補を直す' : '候補を足す', h('div', null,
       h('datalist', { id: 'idea-cities' }, h('option', { value: 'サンフランシスコ' }), h('option', { value: 'ロサンゼルス' })),
       field('タイトル', title), field('都市', city), field('カテゴリ', cat), field('費用の目安（ドル）', cost), field('リンク', link), field('メモ', note)), [
-      { label: 'キャンセル', value: false },
+      { label: 'やめる', value: false },
       {
-        label: '保存', cls: 'btn primary', value: true,
+        label: '保存する', cls: 'btn primary', value: true,
         onClick: setErr => {
           if (!title.value.trim()) { setErr('タイトルを入れてください'); return false; }
           let c = null;
@@ -413,8 +526,9 @@
 
   // ================= 予算 =================
   function viewBudget() {
-    const root = h('div');
+    const root = h('div', { class: 'stack' });
     const people = livePeople();
+    const exps = live('expenses');
     const rateIn = h('input', {
       type: 'text', inputmode: 'decimal', value: rate() ? String(rate()) : '', placeholder: '例: 150', 'aria-label': '1ドルは何円',
       onchange: e => {
@@ -424,61 +538,75 @@
         if (v > 0 && v <= 100000) setMeta({ rate: v }); else { toast('レートは数字で入れてください'); render(); }
       },
     });
-    root.append(h('section', { class: 'card' },
-      h('h3', { text: '為替レート（手入力）' }),
-      h('div', { class: 'row' }, '1ドル =', h('div', { class: 'grow' }, rateIn), '円'),
-      h('p', { class: 'hint', text: '自動では取得しません。円はおおよその目安です。ツアーに含まれる航空券・ホテルは入れず、自由時間の出費だけを記録します。' })));
 
-    root.append(h('section', { class: 'card' },
-      h('div', { class: 'row between' }, h('h3', { text: 'メンバー（' + people.length + '/' + MAX_PEOPLE + '人）' }),
-        btn('＋ 追加', () => chooseProfile(false), 'small primary', { disabled: people.length >= MAX_PEOPLE })),
-      h('div', { class: 'chips' }, people.map(n => h('span', { class: 'chip' }, who(n), h('button', { type: 'button', 'aria-label': n + 'を外す', onclick: () => removePerson(n) }, '×')))),
-      h('p', { class: 'hint', text: 'メンバーはプロフィールと同じです。名前は自分たちで決めてください（本名でなくてOK）。' })));
-
-    const exps = live('expenses');
-    root.append(h('section', { class: 'card' },
-      h('div', { class: 'row between' }, h('h3', { text: '支払い' }), btn('＋ 追加', () => needProfile().then(m => m && expenseForm(null)), 'small primary', { disabled: people.length < 2 })),
-      people.length < 2 ? h('p', { class: 'hint', text: '先にメンバーを2人以上追加してください。' }) : null,
-      !exps.length ? h('p', { class: 'hint', text: 'まだありません。' }) : null,
-      exps.slice().reverse().map(e => h('div', { class: 'pay' },
-        h('div', null, h('div', { class: 't', text: e.title }),
-          h('div', { class: 'small', text: who(e.payer) + 'が払った / ' + (e.split === 'custom' ? '個別: ' + e.custom.map(p => p[0] + ' ' + L.fmtUSD(p[1])).join('、') : e.shares.length + '人で均等: ' + e.shares.join('、')) }),
-          e.by ? h('div', { class: 'by', text: who(e.by) + 'さんが記録' }) : null),
-        h('div', { class: 'row' }, h('span', { class: 'amt', text: money(e.cents) }),
-          btn('編集', () => expenseForm(e), 'small', { 'aria-label': e.title + 'を編集' }),
-          btn('削除', async () => { if (await confirmDlg('「' + e.title + '」を削除しますか？', '削除', true)) removeEntity('expenses', e.id); }, 'small danger', { 'aria-label': e.title + 'を削除' }))))));
-
-    if (exps.length) {
+    if (!exps.length) {
+      root.append(h('section', { class: 'card empty' },
+        h('h2', { class: 'sec', text: '立て替えの記録' }),
+        h('p', { class: 'empty-t', text: '立て替えはまだありません' }),
+        h('p', { class: 'lead', text: 'ごはんや移動のお金を、だれが払ったか記録すると、最後に「だれが誰にいくら」を自動で出します。' }),
+        people.length < 2 ? h('p', { class: 'hint', text: 'まず、下のメンバーを2人以上にしてください。' }) : null,
+        btn('立て替えを記録する', () => needProfile().then(m => m && expenseForm(null)), 'primary', { disabled: people.length < 2 }, 'plus')));
+    } else {
       const { total, rows } = L.summarize(exps);
       const names = [...rows.keys()].sort();
       const sets = L.settle(new Map(names.map(n => [n, rows.get(n).net])));
-      root.append(h('section', { class: 'card' },
-        h('h3', { text: '合計 ' + money(total) }),
-        h('table', null,
-          h('thead', null, h('tr', null, h('th', { text: '名前' }), h('th', { text: '払った' }), h('th', { text: '負担' }), h('th', { text: '差額' }))),
-          h('tbody', null, names.map(n => {
-            const r = rows.get(n);
-            return h('tr', null, h('td', { text: who(n) }), h('td', { text: L.fmtUSD(r.paid) }), h('td', { text: L.fmtUSD(r.owed) }),
-              h('td', { class: r.net > 0 ? 'pos' : r.net < 0 ? 'neg' : '', text: (r.net > 0 ? '+' : '') + L.fmtUSD(r.net) }));
-          }))),
-        h('p', { class: 'hint', text: '差額: ＋は受け取る、－は払う金額です。' })));
-      root.append(h('section', { class: 'card' },
-        h('h3', { text: '精算（送金は最少' + sets.length + '回）' }),
-        sets.length ? sets.map(t => h('div', { class: 'xfer' }, who(t.from) + ' → ' + who(t.to) + '　', h('strong', { text: money(t.cents) }))) : h('p', { text: '精算は不要です。' }),
+      root.append(h('section', { class: 'card hero-money' },
+        h('p', { class: 'kicker', text: 'みんなの出費の合計' }),
+        h('p', { class: 'big-num' }, moneyEl(total)),
+        h('h2', { class: 'sec', text: '精算（送金は最少' + sets.length + '回）' }),
+        sets.length ? h('ul', { class: 'plain xfers' }, sets.map(t => h('li', { class: 'xfer' }, h('span', { class: 'xw', text: who(t.from) }), h('span', { class: 'par' }, 'が'), h('span', { class: 'xw', text: who(t.to) }), h('span', { class: 'par' }, 'に'), h('span', { class: 'amt' }, moneyEl(t.cents), h('span', { class: 'par', text: ' 払う' })))))
+          : h('p', { class: 'lead', text: '精算はいりません。ぴったりです。' }),
         h('p', { class: 'hint', text: '割り切れないときは、1セントをだれか1人に上乗せして合計を合わせています。' })));
+      root.append(h('section', { class: 'card' },
+        h('div', { class: 'row between' }, h('h2', { class: 'sec', text: '立て替えた記録' }), btn('記録する', () => needProfile().then(m => m && expenseForm(null)), 'soft', { disabled: people.length < 2 }, 'plus')),
+        h('ul', { class: 'plain pays' }, exps.slice().reverse().map(e => payRow(e))),
+        h('details', { class: 'more' }, h('summary', { text: 'ひとりずつの内訳を見る' }),
+          h('table', null,
+            h('thead', null, h('tr', null, h('th', { text: '名前' }), h('th', { text: '払った' }), h('th', { text: '負担' }), h('th', { text: '差額' }))),
+            h('tbody', null, names.map(n => {
+              const r = rows.get(n);
+              return h('tr', null, h('td', { text: who(n) }), h('td', { text: L.fmtUSD(r.paid) }), h('td', { text: L.fmtUSD(r.owed) }),
+                h('td', { class: r.net > 0 ? 'pos' : r.net < 0 ? 'neg' : '', text: (r.net > 0 ? '+' : '') + L.fmtUSD(r.net) }));
+            }))),
+          h('p', { class: 'hint', text: '差額: ＋は受け取る、－は払う金額です。' }))));
     }
+
+    root.append(h('section', { class: 'card' },
+      h('div', { class: 'row between' }, h('h2', { class: 'sec', text: 'メンバー（' + people.length + '/' + MAX_PEOPLE + '人）' }),
+        btn('追加する', () => chooseProfile(false), 'soft', { disabled: people.length >= MAX_PEOPLE }, 'plus')),
+      people.length ? h('div', { class: 'chips big' }, people.map(n => h('span', { class: 'chip person' }, who(n), h('button', { type: 'button', 'aria-label': n + 'を外す', onclick: () => removePerson(n) }, ic('x')))))
+        : h('p', { class: 'lead', text: 'まだメンバーがいません。名前とアイコンを決めて、友だちも足しましょう。' }),
+      null));
+    root.append(h('section', { class: 'card soft' },
+      h('h2', { class: 'sec', text: '為替レート（手入力）' }),
+      h('div', { class: 'row' }, '1ドル =', h('div', { class: 'grow' }, rateIn), '円'),
+      h('p', { class: 'hint', text: '自動では取得しません。円はおおよその目安です。ツアーに含まれる航空券・ホテルは入れず、自由時間の出費だけを記録します。' })));
+    root.append(footerLinks());
     return root;
+  }
+  function payRow(e) {
+    const sharers = e.split === 'custom' ? e.custom.map(p => p[0] + ' ' + L.fmtUSD(p[1])) : e.shares.map(n => n);
+    const line = byLine(e);
+    return h('li', { class: 'pay' },
+      h('div', { class: 'pay-main' },
+        h('h4', { class: 'pay-title', text: e.title }),
+        h('p', { class: 'pay-sentence' }, h('strong', { text: who(e.payer) + 'さん' }), 'が ', h('strong', null, moneyEl(e.cents)), h('span', { class: 'nw', text: ' 立て替えた' })),
+        h('p', { class: 'chips' }, h('span', { class: 'chip', text: e.split === 'custom' ? '金額を決めて分けた' : e.shares.length + '人で均等に' }), sharers.map(s => h('span', { class: 'chip', text: s }))),
+        line ? h('p', { class: 'by', text: line }) : null),
+      h('div', { class: 'item-ops' },
+        iconBtn('pencil', e.title + 'を直す', () => expenseForm(e)),
+        iconBtn('trash', e.title + 'を消す', async () => { if (await confirmDlg('「' + e.title + '」を消しますか？', '消す', true)) removeEntity('expenses', e.id); }, 'danger')));
   }
   async function removePerson(name) {
     const used = live('expenses').some(e => e.payer === name || e.shares.includes(name) || e.custom.some(p => p[0] === name));
-    if (used) return toast(name + 'は支払いに使われています。先にその支払いを直すか消してください');
+    if (used) return toast(name + 'さんは立て替えの記録に使われています。先にその記録を直すか消してください');
     if (!(await confirmDlg(who(name) + ' をメンバーから外しますか？', '外す', true))) return;
     if (name === me) setMe('');
     removeEntity('people', 'p:' + name);
   }
   function expenseForm(exp) {
     const people = [...new Set([...livePeople(), ...(exp ? [exp.payer, ...exp.shares, ...exp.custom.map(p => p[0])] : [])])].sort();
-    if (people.length < 2) return toast('先にメンバーを2人以上追加してください');
+    if (people.length < 2) return toast('先にメンバーを2人以上にしてください');
     const e0 = exp || { id: L.newId('e'), title: '', cents: 0, payer: people.includes(me) ? me : people[0], split: 'equal', shares: people, custom: [], by: me };
     const title = h('input', { type: 'text', maxlength: 100, value: e0.title, placeholder: '例: ランチ' });
     const amount = h('input', { type: 'text', inputmode: 'decimal', value: e0.cents ? centsToInput(e0.cents) : '', placeholder: '例: 48.50', oninput: () => updDiff() });
@@ -514,12 +642,12 @@
       }
       updDiff();
     }
-    const body = h('div', null, field('内容', title), field('金額（ドル）', amount), field('払った人', payer), h('div', { class: 'card' }, radios, equalBox, customBox));
+    const body = h('div', null, field('内容', title), field('金額（ドル）', amount), field('払った人', payer), h('div', { class: 'subcard' }, radios, equalBox, customBox));
     upd();
-    return modal(exp ? '支払いを編集' : '支払いを追加', body, [
-      { label: 'キャンセル', value: false },
+    return modal(exp ? '立て替えを直す' : '立て替えを記録する', body, [
+      { label: 'やめる', value: false },
       {
-        label: '保存', cls: 'btn primary', value: true,
+        label: '保存する', cls: 'btn primary', value: true,
         onClick: setErr => {
           const cents = L.parseMoney(amount.value);
           if (!title.value.trim()) { setErr('内容を入れてください'); return false; }
@@ -546,34 +674,44 @@
 
   // ================= チェックリスト =================
   function viewChecks() {
-    const root = h('div');
+    const root = h('div', { class: 'stack' });
+    const total = live('checks'), doneAll = total.filter(c => c.done).length;
+    root.append(h('section', { class: 'card tools' },
+      h('h2', { class: 'sec', text: '出発までの準備' }),
+      h('p', { class: 'lead', text: doneAll === total.length && total.length ? '準備はぜんぶ終わりました。いってらっしゃい！' : 'ひとつずつチェックしていけば大丈夫。いまは ' + doneAll + ' / ' + total.length + ' 終わっています。' }),
+      btn(checkEdit ? '整え終わり' : '項目を整える（直す・消す）', () => { checkEdit = !checkEdit; render(); }, 'soft small', { 'aria-pressed': String(checkEdit) }, checkEdit ? 'check' : 'pencil')));
     for (const g of L.CHECK_GROUPS) {
       const items = live('checks').filter(c => c.group === g);
       const done = items.filter(c => c.done).length;
-      const add = h('input', { type: 'text', maxlength: 120, placeholder: '項目を追加', 'aria-label': CHECK_GROUP_JP[g] + 'に項目を追加', autocomplete: 'off' });
+      const add = h('input', { type: 'text', maxlength: 120, placeholder: '項目を足す（例: 変換プラグ）', 'aria-label': CHECK_GROUP_JP[g] + 'に項目を足す', autocomplete: 'off' });
       root.append(h('section', { class: 'card' },
-        h('h3', { text: CHECK_GROUP_JP[g] + '（' + done + '/' + items.length + '）' }),
-        items.map(c => h('div', { class: 'chk-row' },
+        h('div', { class: 'row between' }, h('h3', { class: 'sec', text: CHECK_GROUP_JP[g] }), h('span', { class: 'count', text: done + ' / ' + items.length })),
+        h('progress', { max: Math.max(items.length, 1), value: done, 'aria-label': CHECK_GROUP_JP[g] + 'の進み具合' }),
+        items.length ? h('ul', { class: 'plain checks' }, items.map(c => h('li', { class: 'chk-row' },
           h('label', { class: 'chk' }, h('input', { type: 'checkbox', checked: c.done, onchange: () => upsert('checks', Object.assign({}, c, { done: !c.done })) }),
             h('span', { class: c.done ? 'done' : '', text: c.text })),
-          btn('✎', async () => editText(c), 'small', { 'aria-label': c.text + 'を編集' }),
-          btn('×', async () => { if (await confirmDlg('「' + c.text + '」を削除しますか？', '削除', true)) removeEntity('checks', c.id); }, 'small danger', { 'aria-label': c.text + 'を削除' }))),
-        h('form', { class: 'row', onsubmit: e => { e.preventDefault(); if (add.value.trim()) upsert('checks', { id: L.newId('c'), group: g, text: add.value, done: false }); } },
-          h('div', { class: 'grow' }, add), h('button', { type: 'submit', class: 'btn' }, '追加'))));
+          checkEdit ? iconBtn('pencil', c.text + 'を直す', () => editText(c)) : null,
+          checkEdit ? iconBtn('trash', c.text + 'を消す', async () => { if (await confirmDlg('「' + c.text + '」を消しますか？', '消す', true)) removeEntity('checks', c.id); }, 'danger') : null)))
+          : h('p', { class: 'hint', text: 'まだ項目がありません。下から足せます。' }),
+        h('form', { class: 'row add', onsubmit: e => { e.preventDefault(); if (add.value.trim()) upsert('checks', { id: L.newId('c'), group: g, text: add.value, done: false }); } },
+          h('div', { class: 'grow' }, add), h('button', { type: 'submit', class: 'btn soft' }, ic('plus'), '足す'))));
     }
     root.append(h('p', { class: 'hint', text: 'メモ用です。パスポート番号や予約番号は書かないでください。' }));
+    root.append(footerLinks());
     return root;
   }
   function editText(c) {
     const input = h('input', { type: 'text', maxlength: 120, value: c.text });
-    return modal('項目を編集', field('内容', input), [
-      { label: 'キャンセル', value: false },
-      { label: '保存', cls: 'btn primary', value: true, onClick: setErr => { if (!input.value.trim()) { setErr('内容を入れてください'); return false; } upsert('checks', Object.assign({}, c, { text: input.value })); } },
+    return modal('項目を直す', field('内容', input), [
+      { label: 'やめる', value: false },
+      { label: '保存する', cls: 'btn primary', value: true, onClick: setErr => { if (!input.value.trim()) { setErr('内容を入れてください'); return false; } upsert('checks', Object.assign({}, c, { text: input.value })); } },
     ]);
   }
 
   // ================= ライブ共有 =================
   const CHIP = { syncing: '同期中…', online: '同期済み', offline: 'オフライン（つながったら自動で同期）', conflict: '競合を解決中…', gone: '共有プランが見つかりません', error: '同期エラー' };
+  const PAUSED_MSG = 'サーバーが休止中のようです。しばらくしてからもう一度。ローカルの内容は消えていません';
+  const LINE_NOTICE = 'LINEの中でリンクを開くと、別の端末のように保存先が分かれてしまうことがあります。右下（または右上）のメニューから「ブラウザで開く」を選ぶか、リンクをコピーして Safari や Chrome で開いてください。';
   const LIVE_ERR = {
     full: '共有プランの数が上限に達しています。しばらくしてからもう一度お試しください。',
     too_large: 'データが大きすぎて保存できません。',
@@ -586,13 +724,17 @@
   const NO_NET = '通信できませんでした。電波のよいところで、もう一度お試しください。';
   const LIVE_NOTICE = '共有プランのデータは、プランがある間、外部サービス Supabase に保存されます。リンクを知っている人はだれでも見て・編集できます。パスポート番号・カード番号・予約番号などは入れないでください。';
   const roomLink = tok => location.origin + location.pathname + '#r=' + tok;
+  // サーバーが答えない/エラーを返し続けている(無料プランの休止など)。電波がないだけのときとは区別する
+  const serverDown = () => !!engine && syncStatus === 'offline' && navigator.onLine !== false && (engine.failures >= 2 || /^http \d/.test(engine.lastNetError || ''));
   function updateChip() {
     const el = document.getElementById('sync-chip');
     if (!el) return;
     if (!engine || !engine.token) { el.hidden = true; return; }
     el.hidden = false;
-    el.dataset.s = syncStatus;
-    el.textContent = '🔗 ' + (CHIP[syncStatus] || '') + (syncStatus === 'error' && syncInfo === 'too_large' ? '（データが大きすぎます）' : '');
+    const down = serverDown();
+    el.dataset.s = down ? 'error' : syncStatus;
+    el.replaceChildren(ic(syncStatus === 'online' ? 'check' : syncStatus === 'offline' || syncStatus === 'gone' || syncStatus === 'error' ? 'cloud-off' : 'refresh-cw'),
+      down ? 'サーバーに届きません' : (CHIP[syncStatus] || '') + (syncStatus === 'error' && syncInfo === 'too_large' ? '（データが大きすぎます）' : ''));
   }
   // 受け取った内容を画面に反映。入力の途中なら、入力が終わるまで待つ(打っている文字が消えないように)
   function renderSoon() {
@@ -627,7 +769,7 @@
       const w = await engine.create(t);
       if (!w.ok) return toast(liveErr(w.error));
       ls.set(KEY.room, t);
-      toast('共有プランを作りました。リンクを友だちに送ってください');
+      toast('共有プランができました。「LINEで送る」で友だちを呼びましょう');
       render();
     } catch (e) { toast(NO_NET); }
   }
@@ -636,7 +778,9 @@
     if (!engine) { strip(); return toast('この版ではライブ共有を使えません'); }
     if (engine.token === token) { strip(); return; }
     const msg = (engine.token ? 'いまの共有プランから抜けて、別の共有プランに参加します。' : '共有プランに参加します。') + 'この端末の内容は共有プランと合体し、みんなの変更が数秒で届き合うようになります（元に戻すためのコピーは作ります）。リンクを知っている人はだれでも編集できます。';
-    if (!(await confirmDlg(msg, '参加する'))) return; // リンクはそのまま残す(あとでもう一度開ける)
+    const ok = await modal('共有プランに参加しますか？', h('div', null, h('p', { text: msg }), IN_LINE ? h('p', { class: 'warn-box' }, ic('info'), LINE_NOTICE) : null),
+      [{ label: 'やめる', value: false }, { label: '参加する', cls: 'btn primary', value: true }]);
+    if (ok !== true) return; // リンクはそのまま残す(あとでもう一度開ける)
     if (!ls.set(KEY.backup, JSON.stringify(state))) return toast('元に戻すためのコピーを保存できないため、参加を中止しました');
     ls.set(KEY.backupJoin, '1');
     if (engine.token) engine.leave();
@@ -647,7 +791,7 @@
       return toast(r === 'gone' ? liveErr('not_found') : 'この共有プランに参加できませんでした。リンクを確かめてください');
     }
     strip(); render();
-    toast(r === 'offline' ? 'いまは通信できません。つながったら自動で参加します' : '共有プランに参加しました');
+    toast(r === 'offline' ? 'いまは通信できません。つながったら自動で参加します' : '共有プランに参加しました。みんなの変更がここに届きます');
     if (!me) chooseProfile(true);
   }
   async function leaveFlow() {
@@ -662,68 +806,116 @@
       ls.del(KEY.room); updateChip(); render(); toast('共有プランを削除しました');
     } catch (e) { toast(NO_NET); }
   }
-  function liveCard() {
-    if (!LIVE_ON || !engine) return null;
-    const notice = h('p', { class: 'hint', text: LIVE_NOTICE });
+  // 「LINEで送る」: 3行(旅の名前 / リンク / 注意)。プランの中身は貼らない
+  function lineShare() {
+    const text = TRIP_NAME + '（' + L.dayDate(state.meta.year, 1).m + '/' + L.dayDate(state.meta.year, 1).d + '〜' + L.dayDate(state.meta.year, 10).m + '/' + L.dayDate(state.meta.year, 10).d + '）のしおりです。\n' + roomLink(engine.token) + '\n※このリンクの人は編集もできます';
+    window.open(L.lineShareUrl(text), '_blank', 'noopener');
+  }
+  function inviteCard() {
+    const lineHint = h('p', { class: 'warn-box' }, ic('info'), LINE_NOTICE);
+    if (!LIVE_ON || !engine) {
+      return h('section', { class: 'card hero' },
+        h('h2', { class: 'sec', text: '友だちに送る' }),
+        h('p', { class: 'lead', text: 'ライブ共有はまだ使えません。いまは、ファイルに保存してLINEのグループに送り、受け取った人が「取り込む」で合体させます。' }),
+        h('div', { class: 'row gap' }, btn('ファイルに保存', exportJson, 'primary', null, 'save')),
+        IN_LINE ? lineHint : null);
+    }
     const tok = engine.token;
     if (!tok) {
-      return h('section', { class: 'card' },
-        h('h3', { text: 'ライブ共有（みんなで同時に編集）' }),
-        h('p', { text: 'リンクを開いた人どうしで、旅程・アイデアの投票・支払いが数秒で届き合います。パスワードはなく、リンクを知っている人だけが入れます。' }),
-        notice,
-        h('div', { class: 'actions' }, btn('共有プランを作る', createRoom, 'primary')));
+      return h('section', { class: 'card hero' },
+        h('h2', { class: 'sec', text: 'みんなで同時に編集しよう' }),
+        h('p', { class: 'lead', text: '共有プランを作ると、LINEで送ったリンクを開いた友だちと、旅程・投票・立て替えが数秒で届き合います。パスワードはいりません。' }),
+        h('div', { class: 'row gap' }, btn('共有プランを作る', createRoom, 'primary', null, 'users')),
+        h('p', { class: 'hint', text: LIVE_NOTICE }),
+        IN_LINE ? lineHint : null);
     }
+    const down = serverDown(), gone = syncStatus === 'gone';
     const box = h('textarea', { readOnly: true, class: 'linkbox', 'aria-label': '招待リンク', onfocus: e => e.target.select() });
     box.value = roomLink(tok);
-    const gone = syncStatus === 'gone';
-    return h('section', { class: 'card' },
-      h('h3', { text: 'ライブ共有' }),
-      h('p', { 'aria-live': 'polite', text: gone ? liveErr('not_found') + ' この端末の内容は残っています。' : (CHIP[syncStatus] || '') }),
-      gone ? h('div', { class: 'actions' }, btn('もう一度共有する', async () => { leaveRoom(); await createRoom(); }, 'primary'), btn('共有をやめる', leaveFlow))
+    return h('section', { class: 'card hero' },
+      h('h2', { class: 'sec', text: '友だちを呼ぶ' }),
+      h('p', { class: 'status-line', 'aria-live': 'polite' }, ic(gone || down || syncStatus === 'offline' ? 'cloud-off' : 'check'), gone ? liveErr('not_found') + ' この端末の内容は残っています。' : down ? PAUSED_MSG : (CHIP[syncStatus] || '')),
+      gone ? h('div', { class: 'row gap' }, btn('もう一度共有する', async () => { leaveRoom(); await createRoom(); }, 'primary', null, 'users'), btn('共有をやめる', leaveFlow))
         : h('div', null,
-          h('p', { class: 'small', text: '招待リンク（友だちに送ってください。リンクを知っている人はだれでも編集できます）' }),
+          h('div', { class: 'row gap' }, btn('LINEで送る', lineShare, 'primary line', null, 'send'),
+            btn('リンクをコピー', async () => { try { await navigator.clipboard.writeText(box.value); toast('リンクをコピーしました'); } catch (e) { box.focus(); box.select(); toast('コピーできませんでした。選択したので手動でコピーしてください'); } }, 'soft', null, 'copy')),
+          h('p', { class: 'hint strong', text: 'このリンクの人は編集もできます。LINEのグループなど、信頼できる相手にだけ送ってください。' }),
           box,
-          h('div', { class: 'actions' }, btn('リンクをコピー', async () => {
-            try { await navigator.clipboard.writeText(box.value); toast('リンクをコピーしました'); } catch (e) { box.focus(); box.select(); toast('コピーできませんでした。選択したので手動でコピーしてください'); }
-          }, 'small primary')),
-          notice,
-          h('div', { class: 'actions' }, btn('このプランから抜ける', leaveFlow), btn('プランを削除', deleteFlow, 'danger'))));
+          lineHint,
+          h('p', { class: 'hint', text: LIVE_NOTICE }),
+          h('div', { class: 'row gap' }, btn('このプランから抜ける', leaveFlow, 'ghost'), btn('プランを削除', deleteFlow, 'danger', null, 'trash'))));
   }
 
   // ================= 共有 =================
   function viewShare() {
-    const root = h('div');
+    const root = h('div', { class: 'stack' });
     const out = h('div', { 'aria-live': 'polite' });
     const paste = h('textarea', { placeholder: '共有リンクをここに貼り付け（保存したファイルの中身でもOK）', 'aria-label': '共有リンクを貼り付け' });
     const file = h('input', { type: 'file', accept: '.json,application/json', hidden: true, onchange: onFile });
-    const live = liveCard();
-    if (live) root.append(live);
+    root.append(inviteCard());
     root.append(h('section', { class: 'card' },
-      h('h3', { text: live ? 'リンクやファイルで合わせる（ライブ共有を使わない場合）' : '友だちと予定を合わせる' }),
-      h('p', { text: '予定やアイデアは、あなたの端末の中にあります。友だちの変更は自動では届きません（リアルタイムではありません）。リンクかファイルを送り合って、「取り込む」で合体させます。' }),
-      h('div', { class: 'actions' }, btn('共有リンクを作る', () => makeLink(out), 'primary'), btn('ファイルに保存', exportJson)),
-      out,
-      h('p', { class: 'hint', text: 'LINEで開けないときは、ファイルを送るか、リンクの文字を貼り付けてください。' }),
-      h('h3', { text: '取り込む' }),
-      h('p', { class: 'hint', text: '取り込む前に、何が変わるか必ず確認画面が出ます。' }),
-      h('div', { class: 'actions' }, btn('ファイルを選んで取り込む', () => file.click()), file),
-      paste,
-      h('div', { class: 'actions' }, btn('貼り付けた内容を確認', () => importPasted(paste.value)))));
-
+      h('details', { class: 'more', open: !LIVE_ON },
+        h('summary', { text: 'リンクやファイルで合わせる（ライブ共有を使わないとき）' }),
+        h('p', { class: 'lead', text: '予定やアイデアはこの端末の中にあります。リンクかファイルを送り合って、「取り込む」で合体させます（リアルタイムではありません）。' }),
+        h('div', { class: 'row gap' }, btn('共有リンクを作る', () => makeLink(out), 'soft', null, 'link'), btn('ファイルに保存', exportJson, 'soft', null, 'save')),
+        out,
+        h('p', { class: 'hint', text: 'LINEで開けないときは、ファイルを送るか、リンクの文字を貼り付けてください。' }),
+        h('h3', { class: 'sub', text: '取り込む' }),
+        h('p', { class: 'hint', text: '取り込む前に、何が変わるか必ず確認画面が出ます。' }),
+        h('div', { class: 'row gap' }, btn('ファイルを選んで取り込む', () => file.click(), 'soft', null, 'upload'), file),
+        paste,
+        h('div', { class: 'row gap' }, btn('貼り付けた内容を確認', () => importPasted(paste.value), 'soft')))));
     const hasBackup = !!ls.get(KEY.backup);
     root.append(h('section', { class: 'card' },
-      h('h3', { text: 'データの管理' }),
-      h('div', { class: 'actions' },
-        hasBackup ? btn('直前の取り込みを元に戻す', undoImport) : null,
-        btn('この端末のデータを全部消す', resetAll, 'danger'))));
-    root.append(h('section', { class: 'card' },
-      h('h3', { text: 'プライバシー' }),
+      h('h2', { class: 'sec', text: 'データの管理' }),
+      h('div', { class: 'row gap' },
+        hasBackup ? btn('直前の取り込みを元に戻す', undoImport, 'soft', null, 'refresh-cw') : null,
+        btn('この端末のデータを全部消す', resetAll, 'danger', null, 'trash'))));
+    root.append(h('section', { class: 'card soft' },
+      h('h2', { class: 'sec', text: 'プライバシー' }),
       h('p', { text: (LIVE_ON ? 'ふだんは外部のサーバーにデータを送りません。「共有プラン」を作る・参加したときだけ、そのプランの内容が Supabase（外部サービス）に保存されます。それ以外の内容はこの端末のブラウザにだけ保存されます。' : 'このアプリは外部のサーバーにデータを送りません。入力した内容はこの端末のブラウザにだけ保存されます。') + '共有リンクには旅程・アイデア・投票・支払い・チェックの内容と、プロフィール（名前とアイコン）が含まれるので、送る相手に気をつけてください。' }),
       h('p', { text: 'ページは公開されています。パスポート番号・カード番号・予約番号・ホテルの部屋情報・自宅の住所は入力しないでください。' }),
-      h('p', { class: 'hint', text: 'プロフィールにパスワードはありません。だれでも好きな名前を選べます（友だち同士用で、なりすましを防ぐ仕組みではありません）。' }),
-      h('p', { class: 'hint', text: '地図リンクを開くと Google マップに場所名が送られます（リンクを押したときだけ）。' })));
+      h('p', { class: 'hint', text: '地図リンクを開くと Google マップに場所名が送られます（押したときだけ）。' }),
+      h('button', { type: 'button', class: 'linkbtn', onclick: () => go('about') }, ic('info'), 'このサイトについて（運営者・保存場所・写真の出典）')));
     return root;
   }
+
+  // ================= このサイトについて =================
+  function viewAbout() {
+    const root = h('div', { class: 'stack about' });
+    const list = Object.keys(credits).map(id => { const idea = state.ideas.find(i => i.id === id); return { id, title: idea ? idea.title : id, c: credits[id] }; });
+    const sec = (title, ...kids) => h('section', { class: 'card' }, h('h2', { class: 'sec', text: title }), ...kids);
+    root.append(h('div', { class: 'row' }, btn('戻る', () => go(prevTab === 'about' ? 'itinerary' : prevTab), 'ghost', null, 'chevron-left')));
+    root.append(h('section', { class: 'card hero' },
+      h('h2', { class: 'sec', text: 'このサイトについて' }),
+      h('p', { class: 'lead', text: 'これは、卒業旅行の計画を友だちとみんなで作るための、小さな無料のアプリです。' }),
+      h('p', { class: 'op' }, h('strong', { text: '運営者: ' }), h('span', { class: 'placeholder', text: '【運営者の名前・連絡先をここに入れます（運営者が記入してください）】' }))));
+    root.append(sec('保存されるもの・保存される場所',
+      h('ul', { class: 'bul' },
+        h('li', { text: '入力した旅程・投票・立て替え・チェックは、まず、このスマホ（ブラウザ）の中に保存されます。' }),
+        h('li', { text: '「共有プラン」を作る・参加したときだけ、そのプランの内容が Supabase（外部のデータベースサービス）に保存されます。共有プランがない間は、サーバーに何も送りません。' }),
+        h('li', { text: '広告・アクセス解析・Cookie は使っていません。' }),
+        h('li', { text: '「地図で見る」「LINEで送る」を押したときだけ、Google マップや LINE に移ります。' }))));
+    root.append(sec('リンクが「かぎ」です',
+      h('p', { text: '共有プランの入口は、長いランダムなリンクだけです。パスワードはありません。リンクを知っている人はだれでも見て・編集でき、プランを削除することもできます。LINEのグループなど、信頼できる相手にだけ送ってください。' }),
+      h('p', { class: 'hint', text: 'プロフィール（名前とアイコン）にもパスワードはありません。だれが決めたかが分かるための仕組みで、なりすまし防止ではありません。' })));
+    root.append(sec('プランの消しかた',
+      h('ul', { class: 'bul' },
+        h('li', { text: '共有プラン: 「共有」タブの「プランを削除」で、サーバーから完全に消せます（元に戻せません）。' }),
+        h('li', { text: '長いあいだ使われない共有プランは、半年ほどで自動的に消えることがあります。' }),
+        h('li', { text: 'この端末の内容: 「共有」タブの「この端末のデータを全部消す」。' }))));
+    root.append(sec('写真・アイコンの出典',
+      h('p', { text: '場所の写真は、Wikimedia Commons にある自由に使える画像（CC0・パブリックドメイン・CC BY・CC BY-SA）です。それぞれの写真の下に、撮影者・ライセンス・出典を表示しています。アイコンは Lucide（ISCライセンス）です。' }),
+      list.length ? h('details', { class: 'more' }, h('summary', { text: '写真のクレジット一覧（' + list.length + '枚）' }),
+        h('ul', { class: 'plain credits' }, list.map(({ title, c }) => h('li', null, h('strong', { text: title }), h('br'), (c.author || '作者不明') + ' / ',
+          c.licenseUrl ? h('a', { href: c.licenseUrl, target: '_blank', rel: 'noopener noreferrer' }, c.license) : c.license, ' / ', h('a', { href: c.sourceUrl, target: '_blank', rel: 'noopener noreferrer' }, '出典'))))) : null));
+    root.append(sec('入れないでほしい情報',
+      h('p', { text: 'パスポート番号・カード番号・予約番号・ホテルの部屋情報・自宅の住所は、どこにも入力しないでください。このアプリはそれらを必要としません。' })));
+    root.append(sec('保証について',
+      h('p', { text: 'このアプリは無料で提供していて、正確さや、ずっと動き続けることは保証できません。金額や営業時間は目安です。大事な予約や出費は、公式の情報で確認してください。データが失われても責任を負えないので、大事な内容は「ファイルに保存」で控えをとっておいてください。' })));
+    return root;
+  }
+
   async function makeLink(out) {
     out.replaceChildren(h('p', { class: 'hint', text: '作成中…' }));
     try {
@@ -735,9 +927,9 @@
       box.value = url;
       out.replaceChildren(box,
         h('p', { class: 'hint', text: 'リンクの長さ: ' + url.length.toLocaleString() + '文字' + (url.length > 2000 ? '（長めです。途中で切れる場合はファイルで送ってください）' : '') + (location.protocol === 'file:' ? '（このリンクは公開後に使えます）' : '') }),
-        h('div', { class: 'actions' }, btn('コピー', async () => {
+        h('div', { class: 'row gap' }, btn('コピー', async () => {
           try { await navigator.clipboard.writeText(url); toast('リンクをコピーしました'); } catch (e) { box.focus(); box.select(); toast('コピーできませんでした。選択したので手動でコピーしてください'); }
-        }, 'small primary')));
+        }, 'soft', null, 'copy')));
     } catch (e) { out.replaceChildren(h('p', { class: 'err', text: 'リンクを作れませんでした: ' + e.message })); }
   }
   function exportJson() {
@@ -786,7 +978,7 @@
             list.length > 15 ? h('li', { text: '…ほか' + (list.length - 15) + '件' }) : null));
       }),
       keeps.length ? h('p', { class: 'hint', text: 'あなたの版のほうが新しいので、そのまま残す項目: ' + keeps.length + '件' }) : null);
-    const ok = await modal('取り込む内容を確認', body, [{ label: 'キャンセル', value: false }, { label: '取り込む', cls: 'btn primary', value: true }]);
+    const ok = await modal('取り込む内容を確認', body, [{ label: 'やめる', value: false }, { label: '取り込む', cls: 'btn primary', value: true }]);
     if (ok !== true) return;
     if (!ls.set(KEY.backup, JSON.stringify(state))) { toast('元に戻すためのコピーを保存できないため、取り込みを中止しました'); return; }
     ls.del(KEY.backupJoin);
@@ -815,22 +1007,50 @@
   }
 
   // ================= 起動 =================
-  const VIEWS = { itinerary: viewItinerary, ideas: viewIdeas, budget: viewBudget, checks: viewChecks, share: viewShare };
+  const VIEWS = { itinerary: viewItinerary, ideas: viewIdeas, budget: viewBudget, checks: viewChecks, share: viewShare, about: viewAbout };
   const main = document.getElementById('app');
   const meBtn = document.getElementById('me-btn');
   meBtn.addEventListener('click', () => chooseProfile(true));
+  // 表紙: 旅の名前・日付・状況(持ち物 n/n ・ 参加者 n人 ・ 未決定の候補 n)
+  function updateCover() {
+    const cover = document.getElementById('cover');
+    cover.classList.toggle('compact', tab !== 'itinerary');
+    document.body.dataset.tab = tab;
+    const a = L.dayDate(state.meta.year, 1), b = L.dayDate(state.meta.year, 10);
+    document.getElementById('cover-dates').replaceChildren(a.m + '/' + a.d + '（' + WD[a.w] + '）– ' + b.m + '/' + b.d + '（' + WD[b.w] + '）', h('span', { class: 'route', text: 'サンフランシスコ → ロサンゼルス' }));
+    const pack = live('checks').filter(c => c.group === 'pack');
+    const und = undecidedCount();
+    const st = document.getElementById('cover-status');
+    st.replaceChildren(
+      h('span', { class: 'st' }, ic('luggage'), '持ち物 ' + pack.filter(c => c.done).length + '/' + pack.length),
+      h('span', { class: 'st' }, ic('users'), '参加者 ' + livePeople().length + '人'),
+      h('span', { class: 'st' }, ic('lightbulb'), '未決定の候補 ' + (und || 'なし')));
+    const cr = document.getElementById('cover-credit');
+    if (cr.dataset.k !== String(!!credits[COVER_ID])) {
+      cr.dataset.k = String(!!credits[COVER_ID]);
+      cr.replaceChildren();
+      const c = credits[COVER_ID];
+      if (c) cr.append('表紙の写真: ' + (c.author || '作者不明') + ' / ', h('a', { href: c.licenseUrl, target: '_blank', rel: 'noopener noreferrer' }, c.license), ' / ', h('a', { href: c.sourceUrl, target: '_blank', rel: 'noopener noreferrer' }, 'Commonsの写真ページ'));
+    }
+  }
   function render() {
     normalizeMe();
     updateChip();
-    meBtn.textContent = me ? who(me) : '👤 名前を選ぶ';
+    updateCover();
+    meBtn.replaceChildren(ic(me ? 'user-round' : 'user-round'), me ? who(me) : '名前を決める');
+    meBtn.setAttribute('aria-label', me ? 'いまの名前: ' + me + '（押すと切りかえ）' : '名前を決める');
     const y = window.scrollY;
-    main.replaceChildren(VIEWS[tab]());
+    main.replaceChildren((VIEWS[tab] || viewItinerary)());
     document.querySelectorAll('nav.tabs [data-tab]').forEach(b => {
       if (b.dataset.tab === tab) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current');
     });
     window.scrollTo(0, y);
   }
-  function go(t) { tab = t; ls.set(KEY.tab, t); render(); window.scrollTo(0, 0); }
+  function go(t) {
+    if (t !== 'about') ls.set(KEY.tab, t);
+    if (t === 'about' && tab !== 'about') prevTab = tab;
+    tab = t; render(); window.scrollTo(0, 0);
+  }
 
   async function loadIdeas() {
     try {
@@ -851,6 +1071,20 @@
       render();
     }
   }
+  async function loadCredits() {
+    try {
+      const r = await fetch('data/credits.json', { cache: 'no-cache' });
+      if (!r.ok) throw new Error('http ' + r.status);
+      const j = await r.json();
+      const out = {};
+      for (const [id, c] of Object.entries(j || {})) {
+        if (!c || typeof c !== 'object') continue;
+        out[String(id).slice(0, 40)] = { author: String(c.author || '').slice(0, 120), license: String(c.license || '').slice(0, 40), licenseUrl: L.safeUrl(c.licenseUrl), sourceUrl: L.safeUrl(c.sourceUrl), modified: !!c.modified, caption: String(c.caption || '').slice(0, 160) };
+      }
+      credits = out;
+    } catch (e) { credits = {}; } // 写真が読めなくても、色のブロックで動く
+    render();
+  }
   async function checkHash() {
     const room = /^#r=([A-Za-z0-9_-]+)$/.exec(location.hash);
     if (room) {
@@ -862,12 +1096,18 @@
     if (!m) return;
     try { await startImport(await L.decodeShare(m[1]), true); } catch (e) { toast('リンクを開けませんでした: ' + (e && e.message ? e.message : '形式が違います')); }
   }
+  // はじめて開いたとき: 名前とアイコンだけ。友だちはLINEのリンクで入る、と一言
+  function firstRun() {
+    if (ls.get(KEY.seen) || me || live('people').length || /^#[rs]=/.test(location.hash)) return;
+    ls.set(KEY.seen, '1');
+    chooseProfile(true, true);
+  }
 
   load();
   document.querySelectorAll('nav.tabs [data-tab]').forEach(b => b.addEventListener('click', () => go(b.dataset.tab)));
   window.addEventListener('hashchange', checkHash);
   render();
   initSync();
-  loadIdeas().then(checkHash);
+  Promise.all([loadCredits(), loadIdeas()]).then(() => { checkHash(); firstRun(); });
   if ('serviceWorker' in navigator && location.protocol !== 'file:') navigator.serviceWorker.register('sw.js').catch(() => { /* オフライン機能なしで続ける */ });
 })();

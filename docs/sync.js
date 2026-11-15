@@ -65,7 +65,7 @@ const TPSync = (() => {
 
     let token = null, lastVersion = -1, serverKey = null, blockedKey = null;
     let running = false, busy = null, again = false, timer = null, debounce = null, failures = 0;
-    let status = 'local';
+    let status = 'local', lastNetError = '';
     const stats = { versionCalls: 0, reads: 0, writes: 0, conflicts: 0, netErrors: 0 };
 
     const setStatus = (s, info) => { status = s; onStatus(s, info); };
@@ -127,7 +127,8 @@ const TPSync = (() => {
           } while (again && running !== false && token);
         } catch (e) {
           failures++; stats.netErrors++;
-          setStatus('offline');
+          lastNetError = e && e.message ? String(e.message) : 'network';
+          setStatus('offline', lastNetError);
           result = 'offline';
         } finally { busy = null; }
         return result;
@@ -147,6 +148,8 @@ const TPSync = (() => {
       get status() { return status; },
       get token() { return token; },
       get version() { return lastVersion; },
+      get failures() { return failures; },
+      get lastNetError() { return lastNetError; },
       stats,
       isRunning: () => running,
       syncOnce,
