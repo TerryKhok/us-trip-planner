@@ -3,8 +3,9 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<!-- 外部への通信は一切なし。file: は直接ファイルを開いた時の確認用 -->
-<meta http-equiv="Content-Security-Policy" content="default-src 'self' file:; img-src 'self' data:; object-src 'none'; base-uri 'none'; form-action 'none'">
+<!-- 外部への通信は、ライブ共有を設定したときの Supabase だけ。file: は直接ファイルを開いた時の確認用 -->
+<!-- connect-src: 同じサイトと Supabase だけ。config.js が、設定したURLだけにさらにしぼる -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'self' file:; img-src 'self' data:; object-src 'none'; base-uri 'none'; form-action 'none'; connect-src 'self' https://*.supabase.co">
 <meta name="referrer" content="no-referrer">
 <meta name="robots" content="noindex, nofollow">
 <meta name="theme-color" content="#0b6b8a">
@@ -18,6 +19,7 @@
   <div>
     <h1>🌴 アメリカ卒業旅行プランナー</h1>
     <p class="sub">サンフランシスコ → ロサンゼルス ・ 1/31〜2/9</p>
+    <p class="sub"><span id="sync-chip" class="sync-chip" hidden></span></p>
   </div>
   <button type="button" id="me-btn" class="who" aria-label="プロフィールを選ぶ・切りかえる">👤 名前を選ぶ</button>
 </header>
@@ -40,7 +42,9 @@
 <div id="toast" role="status" aria-live="polite"></div>
 <noscript><p class="notice">このページはJavaScriptが必要です。</p></noscript>
 
+<script src="config.js"></script>
 <script src="logic.js"></script>
+<script src="sync.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

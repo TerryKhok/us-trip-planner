@@ -1,7 +1,7 @@
 'use strict';
 /* オフライン用: 開いたページと部品を端末に保存。ネットがあれば最新を優先。外部サイトは保存しない。 */
-const CACHE = 'tp-v2';
-const FILES = ['./', 'index.html', 'style.css', 'app.js', 'logic.js', 'data/ideas.json', 'manifest.webmanifest', 'icon.svg'];
+const CACHE = 'tp-v3';
+const FILES = ['./', 'index.html', 'style.css', 'app.js', 'logic.js', 'sync.js', 'config.js', 'data/ideas.json', 'manifest.webmanifest', 'icon.svg'];
 
 self.addEventListener('install', e => {
   e.waitUntil(caches.open(CACHE).then(c => c.addAll(FILES)).then(() => self.skipWaiting()));

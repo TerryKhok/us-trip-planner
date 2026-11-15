@@ -430,6 +430,21 @@ const TPLogic = (() => {
     }
     return out;
   }
+  // ---------- ライブ共有(サーバー上の1つの書類) ----------
+  // 書類 = 触った項目(u>0)と、投票のあるアイデアだけ。既定の初期項目は各端末が持っているので送らない。
+  function toDoc(state) {
+    const out = emptyState();
+    out.meta = state.meta;
+    for (const kind of KINDS) out[kind] = state[kind].filter(e => e.u > 0 || (kind === 'ideas' && e.v && e.v.length));
+    return out;
+  }
+  // 「サーバーが同じ内容を持っているか」を比べるための文字列(順番に左右されない)
+  function docKey(state) {
+    const d = toDoc(state);
+    const o = { meta: d.meta };
+    for (const kind of KINDS) o[kind] = d[kind].slice().sort((a, b) => byName(a.id, b.id));
+    return stable(o);
+  }
   const toB64 = bytes => {
     let s = '';
     for (let i = 0; i < bytes.length; i += 0x8000) s += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
@@ -481,6 +496,6 @@ const TPLogic = (() => {
     parseMoney, fmtUSD, fmtJPY, safeUrl, mapUrl, dayDate, newId,
     cleanVotes, voters, setVote, cleanOne, emptyState, sanitize, clone, seedMissing,
     merge, stable, splitEqual, expenseShares, summarize, settle, zeroSumGroups,
-    stripForShare, encodeShare, decodeShare,
+    stripForShare, encodeShare, decodeShare, toDoc, docKey,
   };
 })();

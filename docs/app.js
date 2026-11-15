@@ -2,7 +2,16 @@
 /* 旅行プランナー: 画面部分。データは端末の localStorage だけに保存。外部通信なし。 */
 (() => {
   const L = TPLogic;
-  const KEY = { state: 'tp.state.v1', me: 'tp.me', tab: 'tp.tab', backup: 'tp.backup.v1' };
+  const KEY = { state: 'tp.state.v1', me: 'tp.me', tab: 'tp.tab', backup: 'tp.backup.v1', room: 'tp.room', backupJoin: 'tp.backup.join' };
+  // ライブ共有の設定(config.js)。空ならこの端末だけで使う(従来どおり)
+  const CFG = window.TP_CONFIG || {};
+  const LIVE_ON = (() => {
+    try {
+      const u = new URL(CFG.supabaseUrl);
+      const localOk = u.protocol === 'http:' && (u.hostname === 'localhost' || u.hostname === '127.0.0.1');
+      return !!CFG.supabaseAnonKey && (u.protocol === 'https:' || localOk);
+    } catch (e) { return false; }
+  })();
   const MAX_PEOPLE = 10;
   const WD = ['日', '月', '火', '水', '木', '金', '土'];
   const CAT_JP = { food: '食事', sight: '観光', activity: '体験', shopping: '買い物', nature: '自然', nightlife: '夜遊び', transport: '移動', other: 'その他' };
@@ -68,6 +77,7 @@
     del(k) { try { localStorage.removeItem(k); } catch (e) { /* 何もしない */ } },
   };
   let state = null, me = '', tab = 'itinerary', ideasMsg = '', saveWarned = false;
+  let engine = null, applying = false, syncStatus = 'local', syncInfo = '', pendingRender = false;
   let fCity = '', fCat = '', fTag = '';
   const PRICE_ASOF = '2026年時点'; // 確認済みの金額を調べた年(データの注記による)
   const TAG_MARK = { games: ['🎮', 'ゲーム'], movies: ['🎬', '映画'] };
@@ -93,6 +103,7 @@
       saveWarned = true;
       toast('この端末に保存できません（プライベートブラウズ？）。「ファイルに保存」で控えを残してください');
     }
+    if (ok && !applying && engine) engine.touch(); // 共有プランに入っているときは、少し待ってから送る
     return ok;
   }
 
@@ -561,14 +572,134 @@
     ]);
   }
 
+  // ================= ライブ共有 =================
+  const CHIP = { syncing: '同期中…', online: '同期済み', offline: 'オフライン（つながったら自動で同期）', conflict: '競合を解決中…', gone: '共有プランが見つかりません', error: '同期エラー' };
+  const LIVE_ERR = {
+    full: '共有プランの数が上限に達しています。しばらくしてからもう一度お試しください。',
+    too_large: 'データが大きすぎて保存できません。',
+    bad_doc: 'データの形式が正しくないため保存できませんでした。',
+    bad_token: 'リンクの形式が正しくありません。',
+    conflict: '同じプランがすでにあります。',
+    not_found: '共有プランが見つかりません（削除されたか、リンクが違います）。',
+  };
+  const liveErr = code => LIVE_ERR[code] || 'うまくいきませんでした（' + code + '）。';
+  const NO_NET = '通信できませんでした。電波のよいところで、もう一度お試しください。';
+  const LIVE_NOTICE = '共有プランのデータは、プランがある間、外部サービス Supabase に保存されます。リンクを知っている人はだれでも見て・編集できます。パスポート番号・カード番号・予約番号などは入れないでください。';
+  const roomLink = tok => location.origin + location.pathname + '#r=' + tok;
+  function updateChip() {
+    const el = document.getElementById('sync-chip');
+    if (!el) return;
+    if (!engine || !engine.token) { el.hidden = true; return; }
+    el.hidden = false;
+    el.dataset.s = syncStatus;
+    el.textContent = '🔗 ' + (CHIP[syncStatus] || '') + (syncStatus === 'error' && syncInfo === 'too_large' ? '（データが大きすぎます）' : '');
+  }
+  // 受け取った内容を画面に反映。入力の途中なら、入力が終わるまで待つ(打っている文字が消えないように)
+  function renderSoon() {
+    const a = document.activeElement;
+    if (a && /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName) && main.contains(a)) {
+      if (!pendingRender) { pendingRender = true; a.addEventListener('blur', () => { pendingRender = false; render(); }, { once: true }); }
+      return;
+    }
+    render();
+  }
+  function initSync() {
+    if (!LIVE_ON) return;
+    engine = TPSync.createEngine({
+      L,
+      transport: TPSync.httpTransport({ url: CFG.supabaseUrl, key: CFG.supabaseAnonKey }),
+      getState: () => state,
+      applyState: s => { applying = true; try { state = s; L.seedMissing(state, defaults()); save(); } finally { applying = false; } renderSoon(); },
+      onStatus: (s, info) => { syncStatus = s; syncInfo = info || ''; updateChip(); if (tab === 'share') renderSoon(); },
+      isVisible: () => document.visibilityState !== 'hidden',
+    });
+    document.addEventListener('visibilitychange', () => { if (document.visibilityState !== 'hidden') engine.wake(); });
+    window.addEventListener('focus', () => engine.wake());
+    window.addEventListener('online', () => engine.wake());
+    const tok = ls.get(KEY.room);
+    if (tok && TPSync.isToken(tok)) engine.resume(tok);
+  }
+  function leaveRoom() { if (engine) engine.leave(); ls.del(KEY.room); updateChip(); }
+  async function createRoom() {
+    if (!(await confirmDlg('いまの旅程・投票・支払いを、外部サービス Supabase に保存して、リンクを知っている人と共有します。リンクを知っている人はだれでも見て・編集できます。パスポート番号などは入れないでください。', '共有プランを作る'))) return;
+    const t = TPSync.makeToken();
+    try {
+      const w = await engine.create(t);
+      if (!w.ok) return toast(liveErr(w.error));
+      ls.set(KEY.room, t);
+      toast('共有プランを作りました。リンクを友だちに送ってください');
+      render();
+    } catch (e) { toast(NO_NET); }
+  }
+  async function joinRoom(token) {
+    const strip = () => history.replaceState(null, '', location.pathname + location.search);
+    if (!engine) { strip(); return toast('この版ではライブ共有を使えません'); }
+    if (engine.token === token) { strip(); return; }
+    const msg = (engine.token ? 'いまの共有プランから抜けて、別の共有プランに参加します。' : '共有プランに参加します。') + 'この端末の内容は共有プランと合体し、みんなの変更が数秒で届き合うようになります（元に戻すためのコピーは作ります）。リンクを知っている人はだれでも編集できます。';
+    if (!(await confirmDlg(msg, '参加する'))) return; // リンクはそのまま残す(あとでもう一度開ける)
+    if (!ls.set(KEY.backup, JSON.stringify(state))) return toast('元に戻すためのコピーを保存できないため、参加を中止しました');
+    ls.set(KEY.backupJoin, '1');
+    if (engine.token) engine.leave();
+    ls.set(KEY.room, token);
+    const r = await engine.join(token);
+    if (r === 'gone' || r === 'error') {
+      leaveRoom(); strip(); render();
+      return toast(r === 'gone' ? liveErr('not_found') : 'この共有プランに参加できませんでした。リンクを確かめてください');
+    }
+    strip(); render();
+    toast(r === 'offline' ? 'いまは通信できません。つながったら自動で参加します' : '共有プランに参加しました');
+    if (!me) chooseProfile(true);
+  }
+  async function leaveFlow() {
+    if (!(await confirmDlg('この共有プランから抜けます。この端末の内容は残りますが、みんなとはつながらなくなります。プランそのものは消えません。', '抜ける', true))) return;
+    leaveRoom(); render(); toast('共有プランから抜けました');
+  }
+  async function deleteFlow() {
+    if (!(await confirmDlg('共有プランをサーバーから完全に削除します。ほかの人も使えなくなり、元に戻せません。この端末の内容は残ります。', '削除する', true))) return;
+    try {
+      const r = await engine.remove();
+      if (!r.ok) return toast(liveErr(r.error));
+      ls.del(KEY.room); updateChip(); render(); toast('共有プランを削除しました');
+    } catch (e) { toast(NO_NET); }
+  }
+  function liveCard() {
+    if (!LIVE_ON || !engine) return null;
+    const notice = h('p', { class: 'hint', text: LIVE_NOTICE });
+    const tok = engine.token;
+    if (!tok) {
+      return h('section', { class: 'card' },
+        h('h3', { text: 'ライブ共有（みんなで同時に編集）' }),
+        h('p', { text: 'リンクを開いた人どうしで、旅程・アイデアの投票・支払いが数秒で届き合います。パスワードはなく、リンクを知っている人だけが入れます。' }),
+        notice,
+        h('div', { class: 'actions' }, btn('共有プランを作る', createRoom, 'primary')));
+    }
+    const box = h('textarea', { readOnly: true, class: 'linkbox', 'aria-label': '招待リンク', onfocus: e => e.target.select() });
+    box.value = roomLink(tok);
+    const gone = syncStatus === 'gone';
+    return h('section', { class: 'card' },
+      h('h3', { text: 'ライブ共有' }),
+      h('p', { 'aria-live': 'polite', text: gone ? liveErr('not_found') + ' この端末の内容は残っています。' : (CHIP[syncStatus] || '') }),
+      gone ? h('div', { class: 'actions' }, btn('もう一度共有する', async () => { leaveRoom(); await createRoom(); }, 'primary'), btn('共有をやめる', leaveFlow))
+        : h('div', null,
+          h('p', { class: 'small', text: '招待リンク（友だちに送ってください。リンクを知っている人はだれでも編集できます）' }),
+          box,
+          h('div', { class: 'actions' }, btn('リンクをコピー', async () => {
+            try { await navigator.clipboard.writeText(box.value); toast('リンクをコピーしました'); } catch (e) { box.focus(); box.select(); toast('コピーできませんでした。選択したので手動でコピーしてください'); }
+          }, 'small primary')),
+          notice,
+          h('div', { class: 'actions' }, btn('このプランから抜ける', leaveFlow), btn('プランを削除', deleteFlow, 'danger'))));
+  }
+
   // ================= 共有 =================
   function viewShare() {
     const root = h('div');
     const out = h('div', { 'aria-live': 'polite' });
     const paste = h('textarea', { placeholder: '共有リンクをここに貼り付け（保存したファイルの中身でもOK）', 'aria-label': '共有リンクを貼り付け' });
     const file = h('input', { type: 'file', accept: '.json,application/json', hidden: true, onchange: onFile });
+    const live = liveCard();
+    if (live) root.append(live);
     root.append(h('section', { class: 'card' },
-      h('h3', { text: '友だちと予定を合わせる' }),
+      h('h3', { text: live ? 'リンクやファイルで合わせる（ライブ共有を使わない場合）' : '友だちと予定を合わせる' }),
       h('p', { text: '予定やアイデアは、あなたの端末の中にあります。友だちの変更は自動では届きません（リアルタイムではありません）。リンクかファイルを送り合って、「取り込む」で合体させます。' }),
       h('div', { class: 'actions' }, btn('共有リンクを作る', () => makeLink(out), 'primary'), btn('ファイルに保存', exportJson)),
       out,
@@ -587,7 +718,7 @@
         btn('この端末のデータを全部消す', resetAll, 'danger'))));
     root.append(h('section', { class: 'card' },
       h('h3', { text: 'プライバシー' }),
-      h('p', { text: 'このアプリは外部のサーバーにデータを送りません。入力した内容はこの端末のブラウザにだけ保存されます。共有リンクには旅程・アイデア・投票・支払い・チェックの内容と、プロフィール（名前とアイコン）が含まれるので、送る相手に気をつけてください。' }),
+      h('p', { text: (LIVE_ON ? 'ふだんは外部のサーバーにデータを送りません。「共有プラン」を作る・参加したときだけ、そのプランの内容が Supabase（外部サービス）に保存されます。それ以外の内容はこの端末のブラウザにだけ保存されます。' : 'このアプリは外部のサーバーにデータを送りません。入力した内容はこの端末のブラウザにだけ保存されます。') + '共有リンクには旅程・アイデア・投票・支払い・チェックの内容と、プロフィール（名前とアイコン）が含まれるので、送る相手に気をつけてください。' }),
       h('p', { text: 'ページは公開されています。パスポート番号・カード番号・予約番号・ホテルの部屋情報・自宅の住所は入力しないでください。' }),
       h('p', { class: 'hint', text: 'プロフィールにパスワードはありません。だれでも好きな名前を選べます（友だち同士用で、なりすましを防ぐ仕組みではありません）。' }),
       h('p', { class: 'hint', text: '地図リンクを開くと Google マップに場所名が送られます（リンクを押したときだけ）。' })));
@@ -658,6 +789,7 @@
     const ok = await modal('取り込む内容を確認', body, [{ label: 'キャンセル', value: false }, { label: '取り込む', cls: 'btn primary', value: true }]);
     if (ok !== true) return;
     if (!ls.set(KEY.backup, JSON.stringify(state))) { toast('元に戻すためのコピーを保存できないため、取り込みを中止しました'); return; }
+    ls.del(KEY.backupJoin);
     state = merged;
     L.seedMissing(state, defaults());
     if (save()) stripHash();
@@ -667,11 +799,17 @@
   }
   async function undoImport() {
     if (!(await confirmDlg('直前の取り込みを取り消して、取り込み前の状態に戻しますか？その後に入力した内容は消えます。', '元に戻す', true))) return;
-    try { state = L.sanitize(JSON.parse(ls.get(KEY.backup))); ls.del(KEY.backup); save(); render(); toast('元に戻しました'); } catch (e) { toast('元に戻せませんでした'); }
+    try {
+      const wasJoin = ls.get(KEY.backupJoin) === '1'; // 共有プランへの参加を取り消すときは、プランからも抜ける
+      state = L.sanitize(JSON.parse(ls.get(KEY.backup))); ls.del(KEY.backup); ls.del(KEY.backupJoin);
+      if (wasJoin) leaveRoom();
+      save(); render(); toast(wasJoin ? '元に戻しました（共有プランからも抜けました）' : '元に戻しました');
+    } catch (e) { toast('元に戻せませんでした'); }
   }
   async function resetAll() {
-    if (!(await confirmDlg('この端末に保存した旅程・アイデアの投票・支払い・チェックをすべて消して、初期状態に戻します。よろしいですか？（先に「ファイルに保存」をおすすめします）', '全部消す', true))) return;
-    state = L.emptyState(); ls.del(KEY.backup);
+    if (!(await confirmDlg('この端末に保存した旅程・アイデアの投票・支払い・チェックをすべて消して、初期状態に戻します（共有プランに入っている場合は、そこからも抜けます。プランそのものは消えません）。よろしいですか？（先に「ファイルに保存」をおすすめします）', '全部消す', true))) return;
+    state = L.emptyState(); ls.del(KEY.backup); ls.del(KEY.backupJoin);
+    leaveRoom(); // 全部消すときは、共有プランからも抜ける(プランそのものは残る)
     L.seedMissing(state, defaults());
     save(); loadIdeas(); render(); toast('初期状態に戻しました');
   }
@@ -683,6 +821,7 @@
   meBtn.addEventListener('click', () => chooseProfile(true));
   function render() {
     normalizeMe();
+    updateChip();
     meBtn.textContent = me ? who(me) : '👤 名前を選ぶ';
     const y = window.scrollY;
     main.replaceChildren(VIEWS[tab]());
@@ -713,6 +852,12 @@
     }
   }
   async function checkHash() {
+    const room = /^#r=([A-Za-z0-9_-]+)$/.exec(location.hash);
+    if (room) {
+      if (TPSync.isToken(room[1])) return joinRoom(room[1]);
+      history.replaceState(null, '', location.pathname + location.search);
+      return toast(liveErr('bad_token'));
+    }
     const m = /^#s=([A-Za-z0-9_-]+)$/.exec(location.hash);
     if (!m) return;
     try { await startImport(await L.decodeShare(m[1]), true); } catch (e) { toast('リンクを開けませんでした: ' + (e && e.message ? e.message : '形式が違います')); }
@@ -722,6 +867,7 @@
   document.querySelectorAll('nav.tabs [data-tab]').forEach(b => b.addEventListener('click', () => go(b.dataset.tab)));
   window.addEventListener('hashchange', checkHash);
   render();
+  initSync();
   loadIdeas().then(checkHash);
   if ('serviceWorker' in navigator && location.protocol !== 'file:') navigator.serviceWorker.register('sw.js').catch(() => { /* オフライン機能なしで続ける */ });
 })();
