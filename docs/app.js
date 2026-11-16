@@ -889,7 +889,8 @@
     root.append(h('section', { class: 'card hero' },
       h('h2', { class: 'sec', text: 'このサイトについて' }),
       h('p', { class: 'lead', text: 'これは、卒業旅行の計画を友だちとみんなで作るための、小さな無料のアプリです。' }),
-      h('p', { class: 'op' }, h('strong', { text: '運営者: ' }), h('span', { class: 'placeholder', text: '【運営者の名前・連絡先をここに入れます（運営者が記入してください）】' }))));
+      h('p', { class: 'op' }, h('strong', { text: '運営者: ' }), h('span', { text: 'カク（ニックネーム）' })),
+      h('p', { class: 'op' }, h('strong', { text: '連絡先: ' }), 'Discord ', h('a', { class: 'lnk', href: 'https://discord.com/users/225438575716466688', target: '_blank', rel: 'noopener noreferrer' }, 'カク（ユーザーID 225438575716466688）'))));
     root.append(sec('保存されるもの・保存される場所',
       h('ul', { class: 'bul' },
         h('li', { text: '入力した旅程・投票・立て替え・チェックは、まず、このスマホ（ブラウザ）の中に保存されます。' }),

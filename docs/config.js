@@ -3,8 +3,8 @@
    入れるのは「Project URL」と「anon public」キーだけ。service_role キーは絶対に入れないでください。
    (anon キーは公開されても安全です: データベースは、秘密のリンクを知っている人の関数経由でしか読み書きできません) */
 window.TP_CONFIG = {
-  supabaseUrl: '',
-  supabaseAnonKey: '',
+  supabaseUrl: 'https://orfzoskitytelqfjqvaa.supabase.co',
+  supabaseAnonKey: 'sb_publishable_WTzEnMcSTUaVgq65MI2hBQ_2InhYDhm',
 };
 
 /* 通信先を、設定したURLだけにしぼる(index.html の許可リストに、さらに条件を足す) */
