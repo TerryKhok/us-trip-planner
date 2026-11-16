@@ -192,5 +192,5 @@ const TPSync = (() => {
     };
   }
 
-  return { isToken, makeToken, sha256hex, httpTransport, createEngine, NetError };
+  return { BUILD: '2026-11-16-r2', isToken, makeToken, sha256hex, httpTransport, createEngine, NetError };
 })();

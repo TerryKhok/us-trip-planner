@@ -77,6 +77,8 @@ const TPLogic = (() => {
     return { m: d.getUTCMonth() + 1, d: d.getUTCDate(), w: d.getUTCDay() };
   }
 
+  const BUILD = '2026-11-16-r2'; // app.js と同じ番号。ちがう組み合わせで読み込まれたら、app.js が気づく
+
   // ---------- ID ----------
   function newId(prefix) {
     const r = new Uint32Array(1);
@@ -170,7 +172,7 @@ const TPLogic = (() => {
       const time = t && +t[1] < 24 && +t[2] < 60 ? t[1].padStart(2, '0') + ':' + t[2] : '';
       return {
         id, day, time, title: S(e.title, 100) || '（無題）', place: S(e.place, 150), mapQuery: S(e.mapQuery, 150), note: S(e.note, 500),
-        type: e.type === 'fixed' ? 'fixed' : 'free', src: S(e.src, 80), by: S(e.by, 30), ed: S(e.ed, 30), u: U(e.u),
+        type: e.type === 'fixed' ? 'fixed' : 'free', src: S(e.src, 80), by: S(e.by, 30), bu: S(e.by, 30) ? U(e.bu) : 0, ed: S(e.ed, 30), u: U(e.u),
       };
     },
     ideas: (e, id) => {
@@ -182,7 +184,7 @@ const TPLogic = (() => {
         category: CATEGORIES.includes(e.category) ? e.category : 'other', costUSD: cost,
         duration: S(e.duration, 40), bestTime: S(e.bestTime, 80), tip: S(e.tip, 300),
         mapQuery: S(e.mapQuery, 150), link: safeUrl(e.link || e.sourceUrl), note: S(e.note, 500),
-        tags: cleanTags(e.tags), verified: e.verified === true, by: S(e.by, 30), ed: S(e.ed, 30), v: cleanVotes(e.v), u: U(e.u),
+        tags: cleanTags(e.tags), verified: e.verified === true, by: S(e.by, 30), bu: S(e.by, 30) ? U(e.bu) : 0, ed: S(e.ed, 30), v: cleanVotes(e.v), u: U(e.u),
       };
     },
     people: (e) => {
@@ -201,7 +203,7 @@ const TPLogic = (() => {
         shares = custom.length ? cleanNames(custom.map(p => p[0])) : shares;
       }
       if (split === 'equal') { custom = []; if (!shares.length) return null; } else shares = [];
-      return { id, title: S(e.title, 100) || '（無題）', cents: e.cents, payer, split, shares, custom, by: S(e.by, 30), ed: S(e.ed, 30), u: U(e.u) };
+      return { id, title: S(e.title, 100) || '（無題）', cents: e.cents, payer, split, shares, custom, by: S(e.by, 30), bu: S(e.by, 30) ? U(e.bu) : 0, ed: S(e.ed, 30), u: U(e.u) };
     },
     checks: (e, id) => {
       const group = S(e.group, 10);
@@ -216,7 +218,7 @@ const TPLogic = (() => {
     if (!id) return null;
     if (e.deleted === true) {
       const t = { id, deleted: true, u: U(e.u) };
-      if (kind === 'items' || kind === 'ideas' || kind === 'expenses') { t.by = S(e.by, 30); t.ed = S(e.ed, 30); }
+      if (kind === 'items' || kind === 'ideas' || kind === 'expenses') { t.by = S(e.by, 30); t.bu = t.by ? U(e.bu) : 0; t.ed = S(e.ed, 30); }
       if (kind === 'ideas') t.v = cleanVotes(e.v);
       return t;
     }
@@ -282,7 +284,7 @@ const TPLogic = (() => {
       default: return '年・為替レート';
     }
   }
-  const strip = e => { const c = Object.assign({}, e); delete c.u; delete c.v; delete c.by; delete c.ed; return c; };
+  const strip = e => { const c = Object.assign({}, e); delete c.u; delete c.v; delete c.by; delete c.bu; delete c.ed; return c; };
   // どちらが新しいか: 更新時刻 → 同じなら内容(作った人・投票は除く)の文字列で決める。誰がどの順で合体しても同じ結果になる。
   function pickNewer(l, r) {
     if (r.u > l.u) return r;
@@ -298,10 +300,13 @@ const TPLogic = (() => {
   }
   function mergeEntity(kind, l, r) {
     let m = pickNewer(l, r);
-    // 作った人(by)は、空でない値のうち辞書順で最小のもの。削除済みの記録にも残す。
+    // 作った人(by)は、いちばん早く作った人。bu = 作った時刻(作ったときに1回だけ決まり、あとで変わらない)。
+    // 古いデータなどで bu がないものは、時刻が分かるものより後ろ。同じなら名前の小さい方。誰がどの順で合体しても同じ結果。削除済みの記録にも残す。
     if ('by' in l || 'by' in r) {
-      const by = [l.by, r.by].filter(Boolean).sort()[0] || '';
-      if (by !== (m.by || '')) m = Object.assign({}, m, { by });
+      const key = x => (x.bu > 0 ? x.bu : Infinity);
+      const c = [l, r].filter(x => x.by).sort((x, y) => (key(x) < key(y) ? -1 : key(x) > key(y) ? 1 : byName(x.by, y.by)))[0];
+      const by = c ? c.by : '', bu = c && c.bu > 0 ? c.bu : 0;
+      if (by !== (m.by || '') || bu !== (m.bu || 0)) m = Object.assign({}, m, { by, bu });
     }
     // 最後に直した人(ed)は、いちばん新しい編集をした人。同じ時刻なら名前の大きい方(順番によらず同じ結果)。
     if ('ed' in l || 'ed' in r) {
@@ -316,7 +321,7 @@ const TPLogic = (() => {
     const keys = new Set([...Object.keys(l), ...Object.keys(m)]);
     const out = [];
     for (const k of keys) {
-      if (k === 'id' || k === 'u' || k === 'v' || k === 'yu' || k === 'ru' || k === 'ed') continue;
+      if (k === 'id' || k === 'u' || k === 'v' || k === 'yu' || k === 'ru' || k === 'ed' || k === 'bu') continue;
       if (stable(l[k]) !== stable(m[k])) out.push(FIELD_JP[k] || k);
     }
     return out;
@@ -545,7 +550,7 @@ const TPLogic = (() => {
 
   return {
     APP_ID, KINDS, CATEGORIES, CHECK_GROUPS, PROFILE_ICONS, IDEA_TAGS,
-    parseMoney, fmtUSD, fmtJPY, safeUrl, mapUrl, dayDate, newId,
+    BUILD, parseMoney, fmtUSD, fmtJPY, safeUrl, mapUrl, dayDate, newId,
     CHOICES, cleanVotes, voters, ballotMap, ballots, agreement, setVote, routeUrl, lineShareUrl, cleanOne, emptyState, sanitize, clone, seedMissing,
     merge, stable, splitEqual, expenseShares, summarize, settle, zeroSumGroups,
     stripForShare, encodeShare, decodeShare, toDoc, docKey,

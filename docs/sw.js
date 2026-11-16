@@ -1,11 +1,19 @@
 'use strict';
 /* オフライン用: 開いたページと部品を端末に保存。ネットがあれば最新を優先。外部サイトは保存しない。
-   写真は、見たものだけを端末に保存する(最初の読み込みを軽くするため、写真は先に全部は保存しない)。 */
-const CACHE = 'tp-v4';
+   写真は、見たものだけを端末に保存する(最初の読み込みを軽くするため、写真は先に全部は保存しない)。
+   【更新のとき】写真(img/*.jpg)や data/credits.json を変えたら、必ず下の CACHE の名前を変えること。
+   写真は一度保存したら再確認しない(名前が変わると、古い保存が全部捨てられて入れ替わる)。 */
+const CACHE = 'tp-v5';
 const FILES = ['./', 'index.html', 'style.css', 'app.js', 'logic.js', 'sync.js', 'config.js', 'data/ideas.json', 'data/credits.json', 'manifest.webmanifest', 'icon.svg', 'img/sf-006.jpg'];
 
 self.addEventListener('install', e => {
-  e.waitUntil(caches.open(CACHE).then(c => c.addAll(FILES)).then(() => self.skipWaiting()));
+  // 全部そろったときだけ入れる(ひとつでも取れなければ失敗して、古い版のまま)。HTTPの古い控えは使わず、毎回サーバーから取る。
+  e.waitUntil(caches.open(CACHE)
+    .then(c => Promise.all(FILES.map(f => fetch(new Request(f, { cache: 'reload' })).then(r => {
+      if (!r.ok) throw new Error('precache ' + f + ' ' + r.status);
+      return c.put(new URL(f, self.registration.scope).href, r);
+    }))))
+    .then(() => self.skipWaiting()));
 });
 self.addEventListener('activate', e => {
   e.waitUntil(caches.keys().then(keys => Promise.all(keys.filter(k => k !== CACHE).map(k => caches.delete(k)))).then(() => self.clients.claim()));

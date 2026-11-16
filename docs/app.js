@@ -1,6 +1,19 @@
 'use strict';
 /* 旅のしおり: 画面部分。データは端末の localStorage に保存。外部通信は、ライブ共有を設定したときの Supabase だけ。 */
 (() => {
+  const BUILD = '2026-11-16-r2'; // logic.js / sync.js と同じ番号。ちがえば、古い部品が混ざっている
+  if (typeof TPSync === 'undefined' || TPLogic.BUILD !== BUILD || TPSync.BUILD !== BUILD) {
+    // 古い控えが残っていて、新旧の部品が混ざった。控えを捨てて、1回だけ読み込み直す(それでもだめなら案内を出す)
+    let tried = false;
+    try { tried = sessionStorage.getItem('tp.stale') === '1'; sessionStorage.setItem('tp.stale', '1'); } catch (e) { /* そのまま */ }
+    if (tried) { const a = document.getElementById('app'); if (a) a.textContent = 'ページの一部が古いままです。ブラウザの更新ボタンで、もう一度読み込んでください。'; return; }
+    const fresh = ['index.html', 'style.css', 'logic.js', 'sync.js', 'config.js', 'app.js'].map(f => fetch(f, { cache: 'reload' }).catch(() => null));
+    const drop = typeof caches === 'object' ? caches.keys().then(ks => Promise.all(ks.map(k => caches.delete(k)))).catch(() => null) : null;
+    const unreg = navigator.serviceWorker ? navigator.serviceWorker.getRegistrations().then(rs => Promise.all(rs.map(r => r.unregister()))).catch(() => null) : null;
+    Promise.all([...fresh, drop, unreg]).then(() => location.reload());
+    return;
+  }
+  try { sessionStorage.removeItem('tp.stale'); } catch (e) { /* そのまま */ } // 部品がそろっているので、次に混ざったときもう一度直せる
   const L = TPLogic;
   const KEY = { state: 'tp.state.v1', me: 'tp.me', tab: 'tp.tab', backup: 'tp.backup.v1', room: 'tp.room', backupJoin: 'tp.backup.join', seen: 'tp.seen' };
   // ライブ共有の設定(config.js)。空ならこの端末だけで使う(従来どおり)
@@ -22,14 +35,14 @@
   const CITY_JP = { 'San Francisco': 'サンフランシスコ', 'Los Angeles': 'ロサンゼルス', 'San Diego': 'サンディエゴ' };
   const CITY_EN = Object.fromEntries(Object.entries(CITY_JP).map(([k, v]) => [v, k]));
   const cityLabel = c => CITY_JP[c] || c;
-  const KIND_JP = { meta: '年・為替レート', days: '都市', items: '旅程の予定', ideas: 'アイデア', people: 'プロフィール', expenses: '支払い', checks: 'チェックリスト' };
+  const KIND_JP = { meta: '年・為替レート', days: '都市', items: '旅程の予定', ideas: '候補', people: 'プロフィール', expenses: '支払い', checks: 'チェックリスト' };
   const TYPE_JP = { add: '追加', update: '変更', delete: '削除', votes: '投票' };
   const TABS = ['itinerary', 'ideas', 'budget', 'checks', 'share'];
 
   // ---- ツアーの日程（ユーザー提供の情報。航空便・時刻・ホテル名は載せない）----
   const DAY_CITY = ['サンフランシスコ', 'サンフランシスコ', 'サンフランシスコ', 'サンフランシスコ → ロサンゼルス',
     'ロサンゼルス', 'ロサンゼルス', 'ロサンゼルス', 'ロサンゼルス', 'ロサンゼルス', '日本'];
-  const FREE_NOTE = 'やりたいことは「アイデア」から入れられます';
+  const FREE_NOTE = 'やりたいことは「候補」から入れられます';
   const PLAN = [
     ['t01', 1, 'fixed', '日本を出発（同じ日にサンフランシスコへ到着）', '日付変更線のため同じ日に着きます'],
     ['t02', 1, 'fixed', 'サンフランシスコ 半日観光（ツアー）', ''],
@@ -204,6 +217,7 @@
     const i = arr.findIndex(x => x.id === c.id);
     c.u = Math.max(Date.now(), i >= 0 ? arr[i].u + 1 : 0);
     if (HAS_ED.includes(kind) && me) c.ed = me; // 最後に直した人(いちばん新しい編集の人)
+    if (HAS_ED.includes(kind)) c.bu = c.by ? (i >= 0 && arr[i].bu ? arr[i].bu : c.u) : 0; // 作った時刻: 最初の1回だけ決めて、あとは変えない
     if (i >= 0) arr[i] = c; else arr.push(c);
     save(); render();
     return true;
@@ -212,7 +226,7 @@
     const arr = state[kind];
     const i = arr.findIndex(x => x.id === id);
     if (i < 0) return;
-    arr[i] = L.cleanOne(kind, { id, deleted: true, u: Math.max(Date.now(), arr[i].u + 1), by: arr[i].by, ed: me || arr[i].ed, v: arr[i].v });
+    arr[i] = L.cleanOne(kind, { id, deleted: true, u: Math.max(Date.now(), arr[i].u + 1), by: arr[i].by, bu: arr[i].bu, ed: me || arr[i].ed, v: arr[i].v });
     save(); render();
   }
   function setMeta(changes) {
@@ -340,14 +354,14 @@
         : (stops.length === 1 ? h('p', { class: 'one-stop' }, mapLink(stops[0], 'この日の場所を地図で見る')) : null),
       h('div', { class: 'row gap' },
         btn('予定を足す', () => needProfile().then(m => m && itemForm(null, id)), '', null, 'plus'),
-        btn('アイデアから入れる', () => go('ideas'), 'ghost', null, 'lightbulb')));
+        btn('候補から入れる', () => go('ideas'), 'ghost', null, 'lightbulb')));
     return h('section', { class: 'card day', 'aria-label': dayLabel(n) },
       h('div', { class: 'day-head' },
         h('div', { class: 'day-no' }, h('span', { class: 'n', text: String(n) }), h('span', { class: 'u', text: '日目' })),
         h('div', { class: 'day-meta' }, h('span', { class: 'date', text: dateLabel(n) }), !items.length ? h('span', { class: 'chip', text: '予定なし' }) : hasFree ? h('span', { class: 'chip free', text: '自由時間あり' }) : h('span', { class: 'chip fixed', text: 'ツアー中心' }))),
       city,
       items.length ? h('ul', { class: 'plain items' }, items.map(itemRow))
-        : h('div', { class: 'empty' }, h('p', { class: 'empty-t', text: 'この日はまだ空いています' }), h('p', { class: 'hint', text: 'アイデアから入れるか、自分で足せます。' })),
+        : h('div', { class: 'empty' }, h('p', { class: 'empty-t', text: 'この日はまだ空いています' }), h('p', { class: 'hint', text: '候補から入れるか、自分で足せます。' })),
       foot);
   }
   function itemRow(it) {
@@ -709,11 +723,11 @@
   }
 
   // ================= ライブ共有 =================
-  const CHIP = { syncing: '同期中…', online: '同期済み', offline: 'オフライン（つながったら自動で同期）', conflict: '競合を解決中…', gone: '共有プランが見つかりません', error: '同期エラー' };
+  const CHIP = { syncing: '同期中…', online: '同期済み', offline: 'オフライン（つながったら自動で同期）', conflict: 'ほかの人の変更と合わせています…', gone: '共有プランが見つかりません', error: '同期エラー' };
   const PAUSED_MSG = 'サーバーが休止中のようです。しばらくしてからもう一度。ローカルの内容は消えていません';
-  const LINE_NOTICE = 'LINEの中でリンクを開くと、別の端末のように保存先が分かれてしまうことがあります。右下（または右上）のメニューから「ブラウザで開く」を選ぶか、リンクをコピーして Safari や Chrome で開いてください。';
+  const LINE_NOTICE = 'LINEの中でリンクを開くと、別の端末のように保存先が分かれてしまうことがあります。右下（または右上）のメニューから「ブラウザで開く」を選ぶか、リンクをコピーして、スマホ標準のブラウザ（SafariやChromeなど）で開いてください。';
   const LIVE_ERR = {
-    full: '共有プランの数が上限に達しています。しばらくしてからもう一度お試しください。',
+    full: '共有プランをためておく場所がいっぱいです。待っても空きません。使っていない共有プランを削除するか、運営者に連絡して整理してもらってください。',
     too_large: 'データが大きすぎて保存できません。',
     bad_doc: 'データの形式が正しくないため保存できませんでした。',
     bad_token: 'リンクの形式が正しくありません。',
@@ -834,7 +848,7 @@
     box.value = roomLink(tok);
     return h('section', { class: 'card hero' },
       h('h2', { class: 'sec', text: '友だちを呼ぶ' }),
-      h('p', { class: 'status-line', 'aria-live': 'polite' }, ic(gone || down || syncStatus === 'offline' ? 'cloud-off' : 'check'), gone ? liveErr('not_found') + ' この端末の内容は残っています。' : down ? PAUSED_MSG : (CHIP[syncStatus] || '')),
+      h('p', { class: 'status-line', 'aria-live': 'polite' }, ic(gone || down || syncStatus === 'offline' ? 'cloud-off' : 'check'), gone ? liveErr('not_found') + ' この端末の内容は残っています。「もう一度共有する」を押すと新しいリンクができます。古いリンクは使えないので、新しいリンクをみんなに送り直してください。' : down ? PAUSED_MSG : (CHIP[syncStatus] || '')),
       gone ? h('div', { class: 'row gap' }, btn('もう一度共有する', async () => { leaveRoom(); await createRoom(); }, 'primary', null, 'users'), btn('共有をやめる', leaveFlow))
         : h('div', null,
           h('div', { class: 'row gap' }, btn('LINEで送る', lineShare, 'primary line', null, 'send'),
@@ -856,7 +870,7 @@
     root.append(h('section', { class: 'card' },
       h('details', { class: 'more', open: !LIVE_ON },
         h('summary', { text: 'リンクやファイルで合わせる（ライブ共有を使わないとき）' }),
-        h('p', { class: 'lead', text: '予定やアイデアはこの端末の中にあります。リンクかファイルを送り合って、「取り込む」で合体させます（リアルタイムではありません）。' }),
+        h('p', { class: 'lead', text: '予定や候補はこの端末の中にあります。リンクかファイルを送り合って、「取り込む」で合体させます（リアルタイムではありません）。' }),
         h('div', { class: 'row gap' }, btn('共有リンクを作る', () => makeLink(out), 'soft', null, 'link'), btn('ファイルに保存', exportJson, 'soft', null, 'save')),
         out,
         h('p', { class: 'hint', text: 'LINEで開けないときは、ファイルを送るか、リンクの文字を貼り付けてください。' }),
@@ -873,7 +887,7 @@
         btn('この端末のデータを全部消す', resetAll, 'danger', null, 'trash'))));
     root.append(h('section', { class: 'card soft' },
       h('h2', { class: 'sec', text: 'プライバシー' }),
-      h('p', { text: (LIVE_ON ? 'ふだんは外部のサーバーにデータを送りません。「共有プラン」を作る・参加したときだけ、そのプランの内容が Supabase（外部サービス）に保存されます。それ以外の内容はこの端末のブラウザにだけ保存されます。' : 'このアプリは外部のサーバーにデータを送りません。入力した内容はこの端末のブラウザにだけ保存されます。') + '共有リンクには旅程・アイデア・投票・支払い・チェックの内容と、プロフィール（名前とアイコン）が含まれるので、送る相手に気をつけてください。' }),
+      h('p', { text: (LIVE_ON ? 'ふだんは外部のサーバーにデータを送りません。「共有プラン」を作る・参加したときだけ、そのプランの内容が Supabase（外部サービス）に保存されます。それ以外の内容はこの端末のブラウザにだけ保存されます。' : 'このアプリは外部のサーバーにデータを送りません。入力した内容はこの端末のブラウザにだけ保存されます。') + '共有リンクには旅程・候補・投票・支払い・チェックの内容と、プロフィール（名前とアイコン）が含まれるので、送る相手に気をつけてください。' }),
       h('p', { text: 'ページは公開されています。パスポート番号・カード番号・予約番号・ホテルの部屋情報・自宅の住所は入力しないでください。' }),
       h('p', { class: 'hint', text: '地図リンクを開くと Google マップに場所名が送られます（押したときだけ）。' }),
       h('button', { type: 'button', class: 'linkbtn', onclick: () => go('about') }, ic('info'), 'このサイトについて（運営者・保存場所・写真の出典）')));
@@ -893,9 +907,9 @@
       h('p', { class: 'op' }, h('strong', { text: '連絡先: ' }), 'Discord ', h('a', { class: 'lnk', href: 'https://discord.com/users/225438575716466688', target: '_blank', rel: 'noopener noreferrer' }, 'カク（ユーザーID 225438575716466688）'))));
     root.append(sec('保存されるもの・保存される場所',
       h('ul', { class: 'bul' },
-        h('li', { text: '入力した旅程・投票・立て替え・チェックは、まず、このスマホ（ブラウザ）の中に保存されます。' }),
-        h('li', { text: '「共有プラン」を作る・参加したときだけ、そのプランの内容が Supabase（外部のデータベースサービス）に保存されます。共有プランがない間は、サーバーに何も送りません。' }),
-        h('li', { text: '広告・アクセス解析・Cookie は使っていません。' }),
+        h('li', { text: '入力した旅程・候補・投票・立て替え・チェック・プロフィール（名前とアイコン）は、まず、このスマホ（ブラウザ）の中に保存されます。' }),
+        h('li', { text: '「共有プラン」を作る・参加したときだけ、そのプランの内容（旅程・候補・投票・支払い・チェック・プロフィール）が Supabase（外部のデータベースサービス）に保存されます。共有プランがない間は、サーバーに何も送りません。' }),
+        h('li', { text: '広告・アクセス解析・クッキーは使っていません。' }),
         h('li', { text: '「地図で見る」「LINEで送る」を押したときだけ、Google マップや LINE に移ります。' }))));
     root.append(sec('リンクが「かぎ」です',
       h('p', { text: '共有プランの入口は、長いランダムなリンクだけです。パスワードはありません。リンクを知っている人はだれでも見て・編集でき、プランを削除することもできます。LINEのグループなど、信頼できる相手にだけ送ってください。' }),
@@ -1000,7 +1014,7 @@
     } catch (e) { toast('元に戻せませんでした'); }
   }
   async function resetAll() {
-    if (!(await confirmDlg('この端末に保存した旅程・アイデアの投票・支払い・チェックをすべて消して、初期状態に戻します（共有プランに入っている場合は、そこからも抜けます。プランそのものは消えません）。よろしいですか？（先に「ファイルに保存」をおすすめします）', '全部消す', true))) return;
+    if (!(await confirmDlg('この端末に保存した旅程・候補の投票・支払い・チェックをすべて消して、初期状態に戻します（共有プランに入っている場合は、そこからも抜けます。プランそのものは消えません）。よろしいですか？（先に「ファイルに保存」をおすすめします）', '全部消す', true))) return;
     state = L.emptyState(); ls.del(KEY.backup); ls.del(KEY.backupJoin);
     leaveRoom(); // 全部消すときは、共有プランからも抜ける(プランそのものは残る)
     L.seedMissing(state, defaults());
@@ -1068,7 +1082,7 @@
       ideasMsg = '';
       save(); render();
     } catch (e) {
-      ideasMsg = 'アイデアの初期データを読み込めませんでした（ファイルを直接開いた場合は表示されません。公開ページから開いてください）。';
+      ideasMsg = '候補の初期データを読み込めませんでした（ファイルを直接開いた場合は表示されません。公開ページから開いてください）。';
       render();
     }
   }
@@ -1110,5 +1124,18 @@
   render();
   initSync();
   Promise.all([loadCredits(), loadIdeas()]).then(() => { checkHash(); firstRun(); });
-  if ('serviceWorker' in navigator && location.protocol !== 'file:') navigator.serviceWorker.register('sw.js').catch(() => { /* オフライン機能なしで続ける */ });
+  if ('serviceWorker' in navigator && location.protocol !== 'file:') {
+    // 新しいサービスワーカーに切りかわったら、1回だけ読み込み直す(開いたままのタブが古いJavaScriptを使い続けないように)
+    const had = !!navigator.serviceWorker.controller;
+    navigator.serviceWorker.addEventListener('controllerchange', () => {
+      if (!had) return; // はじめてのインストールでは読み込み直さない
+      let last = 0;
+      try { last = Number(sessionStorage.getItem('tp.swreload')) || 0; } catch (e) { /* そのまま */ }
+      if (Date.now() - last < 60000) return; // 読み込み直しの繰り返しを防ぐ
+      try { sessionStorage.setItem('tp.swreload', String(Date.now())); } catch (e) { /* そのまま */ }
+      if (document.querySelector('dialog[open]')) return toast('新しいバージョンがあります。あとで開き直すと切りかわります');
+      location.reload();
+    });
+    navigator.serviceWorker.register('sw.js').catch(() => { /* オフライン機能なしで続ける */ });
+  }
 })();

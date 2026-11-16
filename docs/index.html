@@ -4,8 +4,8 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <!-- 外部への通信は、ライブ共有を設定したときの Supabase だけ。file: は直接ファイルを開いた時の確認用 -->
-<!-- connect-src: 同じサイトと Supabase だけ。config.js が、設定したURLだけにさらにしぼる -->
-<meta http-equiv="Content-Security-Policy" content="default-src 'self' file:; img-src 'self' data:; object-src 'none'; base-uri 'none'; form-action 'none'; connect-src 'self' https://*.supabase.co">
+<!-- connect-src: 同じサイトと、このプロジェクトの Supabase だけ(config.js の supabaseUrl と同じURL)。別のプロジェクトにするときは、ここも書き換える -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'self' file:; img-src 'self' data:; object-src 'none'; base-uri 'none'; form-action 'none'; connect-src 'self' https://orfzoskitytelqfjqvaa.supabase.co">
 <meta name="referrer" content="no-referrer">
 <meta name="robots" content="noindex, nofollow">
 <meta name="color-scheme" content="light dark">

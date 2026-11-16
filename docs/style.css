@@ -54,7 +54,7 @@ a { color: var(--accent-strong); overflow-wrap: anywhere; text-underline-offset:
 .cover .sync-row { margin: 0 0 4px; }
 .sync-chip { display: inline-flex; align-items: center; gap: 6px; font-size: .9rem; padding: 3px 12px; border-radius: 999px; background: rgba(255, 255, 255, .2); border: 1px solid rgba(255, 255, 255, .45); }
 .sync-chip[data-s=offline], .sync-chip[data-s=gone], .sync-chip[data-s=error] { background: var(--warn-soft); color: var(--warn-ink); border-color: #e0b84a; }
-.cover .credit { margin: 4px 0 0; font-size: .8rem; line-height: 1.5; color: rgba(255, 255, 255, .92); }
+.cover .credit { margin: 4px 0 0; font-size: .875rem; line-height: 1.5; color: rgba(255, 255, 255, .92); }
 .cover .credit a { color: #fff; }
 .cover.compact { background: var(--deep); }
 .cover.compact .cover-img, .cover.compact .cover-shade, .cover.compact .dates, .cover.compact .status, .cover.compact .credit { display: none; }
@@ -128,7 +128,7 @@ progress::-moz-progress-bar { background: var(--go); border-radius: 99px; }
 
 /* ---------- タブ ---------- */
 nav.tabs { position: fixed; left: 0; right: 0; bottom: 0; z-index: 10; display: grid; grid-template-columns: repeat(5, 1fr); gap: 4px; padding: 6px 8px calc(6px + env(safe-area-inset-bottom)); background: var(--card); box-shadow: 0 -10px 24px -14px rgba(40, 25, 5, .4); }
-nav.tabs button { min-height: 56px; border: 0; background: none; color: var(--ink2); display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px; border-radius: 18px; font: inherit; font-size: .8rem; font-weight: 700; cursor: pointer; }
+nav.tabs button { min-height: 56px; border: 0; background: none; color: var(--ink2); display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px; border-radius: 18px; font: inherit; font-size: .875rem; font-weight: 700; cursor: pointer; }
 nav.tabs .ic { width: 1.55rem; height: 1.55rem; }
 nav.tabs button[aria-current=page] { background: var(--accent-soft); color: var(--accent-strong); }
 body[data-tab=about] nav.tabs button[aria-current] { background: none; }
@@ -171,7 +171,7 @@ body[data-tab=about] nav.tabs button[aria-current] { background: none; }
 /* ---------- 写真 ---------- */
 .ph { margin: 0; background: var(--paper2); }
 .ph img { display: block; width: 100%; height: auto; aspect-ratio: 16 / 9; object-fit: cover; background: var(--accent-soft); }
-.ph .cr { margin: 0; padding: 7px 14px 8px; font-size: .8rem; line-height: 1.55; color: var(--ink2); background: var(--paper2); }
+.ph .cr { margin: 0; padding: 7px 14px 8px; font-size: .875rem; line-height: 1.55; color: var(--ink2); background: var(--paper2); }
 .ph .cr .cap { display: block; color: var(--ink); font-weight: 600; margin-bottom: 2px; }
 .ph .cr a { color: var(--ink2); }
 .ph-none { aspect-ratio: 16 / 9; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px; background: linear-gradient(135deg, var(--accent-soft), var(--ocean-soft)); color: var(--accent-strong); font-weight: 700; }
