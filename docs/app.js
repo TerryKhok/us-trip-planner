@@ -1,7 +1,7 @@
 'use strict';
 /* 旅のしおり: 画面部分。データは端末の localStorage に保存。外部通信は、ライブ共有を設定したときの Supabase だけ。 */
 (() => {
-  const BUILD = '2026-11-16-r2'; // logic.js / sync.js と同じ番号。ちがえば、古い部品が混ざっている
+  const BUILD = '2026-11-16-r3'; // logic.js / sync.js と同じ番号。ちがえば、古い部品が混ざっている
   if (typeof TPSync === 'undefined' || TPLogic.BUILD !== BUILD || TPSync.BUILD !== BUILD) {
     // 古い控えが残っていて、新旧の部品が混ざった。控えを捨てて、1回だけ読み込み直す(それでもだめなら案内を出す)
     let tried = false;
@@ -25,7 +25,6 @@
       return !!CFG.supabaseAnonKey && (u.protocol === 'https:' || localOk);
     } catch (e) { return false; }
   })();
-  const IN_LINE = /\bLine\//i.test(navigator.userAgent || ''); // LINEアプリの中のブラウザ
   const TRIP_NAME = 'アメリカ卒業旅行';
   const COVER_ID = 'sf-006'; // 表紙の写真(ゴールデン・ゲート・ブリッジ)
   const MAX_PEOPLE = 10;
@@ -251,7 +250,7 @@
     return modal(welcome ? 'ようこそ、旅のしおりへ' : switchTo ? 'あなたの名前は？' : 'メンバーを追加', finish => {
       const existing = live('people').slice().sort((x, y) => (x.name < y.name ? -1 : 1));
       return h('div', null,
-        welcome ? h('p', { class: 'lead', text: '友だちとは、LINEで送るリンクで一緒に使えます。まずは、名前とアイコンを決めましょう。' }) : null,
+        welcome ? h('p', { class: 'lead', text: '友だちとは、Discordで送るリンクで一緒に使えます。まずは、名前とアイコンを決めましょう。' }) : null,
         switchTo && existing.length ? h('div', null, h('h3', { text: 'いるメンバーから選ぶ' }),
           h('div', { class: 'chips' }, existing.map(p => h('button', { type: 'button', class: 'btn small' + (p.name === me ? ' primary' : ''), onclick: () => { setMe(p.name); finish(true); } }, p.icon + ' ' + p.name)))) : null,
         h('h3', { text: switchTo && existing.length ? '新しく作る' : '名前とアイコン' }),
@@ -725,7 +724,8 @@
   // ================= ライブ共有 =================
   const CHIP = { syncing: '同期中…', online: '同期済み', offline: 'オフライン（つながったら自動で同期）', conflict: 'ほかの人の変更と合わせています…', gone: '共有プランが見つかりません', error: '同期エラー' };
   const PAUSED_MSG = 'サーバーが休止中のようです。しばらくしてからもう一度。ローカルの内容は消えていません';
-  const LINE_NOTICE = 'LINEの中でリンクを開くと、別の端末のように保存先が分かれてしまうことがあります。右下（または右上）のメニューから「ブラウザで開く」を選ぶか、リンクをコピーして、スマホ標準のブラウザ（SafariやChromeなど）で開いてください。';
+  // Discord のアプリ内ブラウザかどうかは判別できないので、全員に短いヒントとして出す(「ことがある」と書く。動きは確かめていない)
+  const APP_BROWSER_HINT = 'Discordのアプリからリンクを開くと、アプリの中のブラウザで開き、保存先が別になることがあります。うまく同期できないときは、メニューから「ブラウザで開く」を選ぶか、リンクをコピーしてスマホ標準のブラウザ（SafariやChromeなど）で開いてください。';
   const LIVE_ERR = {
     full: '共有プランをためておく場所がいっぱいです。待っても空きません。使っていない共有プランを削除するか、運営者に連絡して整理してもらってください。',
     too_large: 'データが大きすぎて保存できません。',
@@ -783,7 +783,7 @@
       const w = await engine.create(t);
       if (!w.ok) return toast(liveErr(w.error));
       ls.set(KEY.room, t);
-      toast('共有プランができました。「LINEで送る」で友だちを呼びましょう');
+      toast('共有プランができました。「Discord用の文をコピー」で友だちを呼びましょう');
       render();
     } catch (e) { toast(NO_NET); }
   }
@@ -792,7 +792,7 @@
     if (!engine) { strip(); return toast('この版ではライブ共有を使えません'); }
     if (engine.token === token) { strip(); return; }
     const msg = (engine.token ? 'いまの共有プランから抜けて、別の共有プランに参加します。' : '共有プランに参加します。') + 'この端末の内容は共有プランと合体し、みんなの変更が数秒で届き合うようになります（元に戻すためのコピーは作ります）。リンクを知っている人はだれでも編集できます。';
-    const ok = await modal('共有プランに参加しますか？', h('div', null, h('p', { text: msg }), IN_LINE ? h('p', { class: 'warn-box' }, ic('info'), LINE_NOTICE) : null),
+    const ok = await modal('共有プランに参加しますか？', h('div', null, h('p', { text: msg }), h('p', { class: 'hint', text: APP_BROWSER_HINT })),
       [{ label: 'やめる', value: false }, { label: '参加する', cls: 'btn primary', value: true }]);
     if (ok !== true) return; // リンクはそのまま残す(あとでもう一度開ける)
     if (!ls.set(KEY.backup, JSON.stringify(state))) return toast('元に戻すためのコピーを保存できないため、参加を中止しました');
@@ -820,42 +820,42 @@
       ls.del(KEY.room); updateChip(); render(); toast('共有プランを削除しました');
     } catch (e) { toast(NO_NET); }
   }
-  // 「LINEで送る」: 3行(旅の名前 / リンク / 注意)。プランの中身は貼らない
-  function lineShare() {
-    const text = TRIP_NAME + '（' + L.dayDate(state.meta.year, 1).m + '/' + L.dayDate(state.meta.year, 1).d + '〜' + L.dayDate(state.meta.year, 10).m + '/' + L.dayDate(state.meta.year, 10).d + '）のしおりです。\n' + roomLink(engine.token) + '\n※このリンクの人は編集もできます';
-    window.open(L.lineShareUrl(text), '_blank', 'noopener');
+  // 「Discord用の文をコピー」: 3行の文をクリップボードへ。通信はしない。コピーできないときは、文を出して選ぶ
+  async function copyShareText(msgBox) {
+    const text = L.shareText(TRIP_NAME, state.meta.year, roomLink(engine.token));
+    try { await navigator.clipboard.writeText(text); msgBox.hidden = true; toast('コピーしました。Discordのチャンネルに貼り付けてください'); }
+    catch (e) { msgBox.value = text; msgBox.hidden = false; msgBox.focus(); msgBox.select(); toast('コピーできませんでした。選択したので手動でコピーしてください'); }
   }
   function inviteCard() {
-    const lineHint = h('p', { class: 'warn-box' }, ic('info'), LINE_NOTICE);
     if (!LIVE_ON || !engine) {
       return h('section', { class: 'card hero' },
         h('h2', { class: 'sec', text: '友だちに送る' }),
-        h('p', { class: 'lead', text: 'ライブ共有はまだ使えません。いまは、ファイルに保存してLINEのグループに送り、受け取った人が「取り込む」で合体させます。' }),
-        h('div', { class: 'row gap' }, btn('ファイルに保存', exportJson, 'primary', null, 'save')),
-        IN_LINE ? lineHint : null);
+        h('p', { class: 'lead', text: 'ライブ共有はまだ使えません。いまは、ファイルに保存してDiscordのチャンネルに送り、受け取った人が「取り込む」で合体させます。' }),
+        h('div', { class: 'row gap' }, btn('ファイルに保存', exportJson, 'primary', null, 'save')));
     }
     const tok = engine.token;
     if (!tok) {
       return h('section', { class: 'card hero' },
         h('h2', { class: 'sec', text: 'みんなで同時に編集しよう' }),
-        h('p', { class: 'lead', text: '共有プランを作ると、LINEで送ったリンクを開いた友だちと、旅程・投票・立て替えが数秒で届き合います。パスワードはいりません。' }),
+        h('p', { class: 'lead', text: '共有プランを作ると、Discordで送ったリンクを開いた友だちと、旅程・投票・立て替えが数秒で届き合います。パスワードはいりません。' }),
         h('div', { class: 'row gap' }, btn('共有プランを作る', createRoom, 'primary', null, 'users')),
-        h('p', { class: 'hint', text: LIVE_NOTICE }),
-        IN_LINE ? lineHint : null);
+        h('p', { class: 'hint', text: LIVE_NOTICE }));
     }
     const down = serverDown(), gone = syncStatus === 'gone';
     const box = h('textarea', { readOnly: true, class: 'linkbox', 'aria-label': '招待リンク', onfocus: e => e.target.select() });
     box.value = roomLink(tok);
+    const msgBox = h('textarea', { readOnly: true, class: 'linkbox', hidden: true, 'aria-label': 'Discordに貼る文', onfocus: e => e.target.select() });
     return h('section', { class: 'card hero' },
       h('h2', { class: 'sec', text: '友だちを呼ぶ' }),
       h('p', { class: 'status-line', 'aria-live': 'polite' }, ic(gone || down || syncStatus === 'offline' ? 'cloud-off' : 'check'), gone ? liveErr('not_found') + ' この端末の内容は残っています。「もう一度共有する」を押すと新しいリンクができます。古いリンクは使えないので、新しいリンクをみんなに送り直してください。' : down ? PAUSED_MSG : (CHIP[syncStatus] || '')),
       gone ? h('div', { class: 'row gap' }, btn('もう一度共有する', async () => { leaveRoom(); await createRoom(); }, 'primary', null, 'users'), btn('共有をやめる', leaveFlow))
         : h('div', null,
-          h('div', { class: 'row gap' }, btn('LINEで送る', lineShare, 'primary line', null, 'send'),
+          h('div', { class: 'row gap' }, btn('Discord用の文をコピー', () => copyShareText(msgBox), 'primary', null, 'copy'),
             btn('リンクをコピー', async () => { try { await navigator.clipboard.writeText(box.value); toast('リンクをコピーしました'); } catch (e) { box.focus(); box.select(); toast('コピーできませんでした。選択したので手動でコピーしてください'); } }, 'soft', null, 'copy')),
-          h('p', { class: 'hint strong', text: 'このリンクの人は編集もできます。LINEのグループなど、信頼できる相手にだけ送ってください。' }),
+          h('p', { class: 'hint strong', text: 'このリンクの人は編集もできます。リンクは、友だちだけのプライベートなチャンネルかグループDMにだけ送ってください（そのチャンネルを読める人は、だれでも編集できます）。' }),
           box,
-          lineHint,
+          msgBox,
+          h('p', { class: 'hint', text: APP_BROWSER_HINT }),
           h('p', { class: 'hint', text: LIVE_NOTICE }),
           h('div', { class: 'row gap' }, btn('このプランから抜ける', leaveFlow, 'ghost'), btn('プランを削除', deleteFlow, 'danger', null, 'trash'))));
   }
@@ -873,7 +873,7 @@
         h('p', { class: 'lead', text: '予定や候補はこの端末の中にあります。リンクかファイルを送り合って、「取り込む」で合体させます（リアルタイムではありません）。' }),
         h('div', { class: 'row gap' }, btn('共有リンクを作る', () => makeLink(out), 'soft', null, 'link'), btn('ファイルに保存', exportJson, 'soft', null, 'save')),
         out,
-        h('p', { class: 'hint', text: 'LINEで開けないときは、ファイルを送るか、リンクの文字を貼り付けてください。' }),
+        h('p', { class: 'hint', text: 'Discordで開けないときは、ファイルを送るか、リンクの文字を貼り付けてください。' }),
         h('h3', { class: 'sub', text: '取り込む' }),
         h('p', { class: 'hint', text: '取り込む前に、何が変わるか必ず確認画面が出ます。' }),
         h('div', { class: 'row gap' }, btn('ファイルを選んで取り込む', () => file.click(), 'soft', null, 'upload'), file),
@@ -910,9 +910,10 @@
         h('li', { text: '入力した旅程・候補・投票・立て替え・チェック・プロフィール（名前とアイコン）は、まず、このスマホ（ブラウザ）の中に保存されます。' }),
         h('li', { text: '「共有プラン」を作る・参加したときだけ、そのプランの内容（旅程・候補・投票・支払い・チェック・プロフィール）が Supabase（外部のデータベースサービス）に保存されます。共有プランがない間は、サーバーに何も送りません。' }),
         h('li', { text: '広告・アクセス解析・クッキーは使っていません。' }),
-        h('li', { text: '「地図で見る」「LINEで送る」を押したときだけ、Google マップや LINE に移ります。' }))));
+        h('li', { text: '「地図で見る」を押したときだけ、Google マップに移ります。' }))));
     root.append(sec('リンクが「かぎ」です',
-      h('p', { text: '共有プランの入口は、長いランダムなリンクだけです。パスワードはありません。リンクを知っている人はだれでも見て・編集でき、プランを削除することもできます。LINEのグループなど、信頼できる相手にだけ送ってください。' }),
+      h('p', { text: '共有プランの入口は、長いランダムなリンクだけです。パスワードはありません。リンクを知っている人はだれでも見て・編集でき、プランを削除することもできます。Discordのチャンネルなど、友だちだけの場所にだけ送ってください。' }),
+      h('p', { class: 'hint', text: 'リンクの「#」より後ろ(かぎの部分)は、Discordがリンクの見本（プレビュー）を作るときにも、サーバーには送られません。' }),
       h('p', { class: 'hint', text: 'プロフィール（名前とアイコン）にもパスワードはありません。だれが決めたかが分かるための仕組みで、なりすまし防止ではありません。' })));
     root.append(sec('プランの消しかた',
       h('ul', { class: 'bul' },
@@ -1111,7 +1112,7 @@
     if (!m) return;
     try { await startImport(await L.decodeShare(m[1]), true); } catch (e) { toast('リンクを開けませんでした: ' + (e && e.message ? e.message : '形式が違います')); }
   }
-  // はじめて開いたとき: 名前とアイコンだけ。友だちはLINEのリンクで入る、と一言
+  // はじめて開いたとき: 名前とアイコンだけ。友だちはDiscordのリンクで入る、と一言
   function firstRun() {
     if (ls.get(KEY.seen) || me || live('people').length || /^#[rs]=/.test(location.hash)) return;
     ls.set(KEY.seen, '1');

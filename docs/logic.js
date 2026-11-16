@@ -69,7 +69,11 @@ const TPLogic = (() => {
     if (use.length > 2) u += '&waypoints=' + use.slice(1, -1).map(q).join('%7C');
     return u;
   }
-  const lineShareUrl = text => 'https://line.me/R/share?text=' + encodeURIComponent(text);
+  // Discord に貼る3行(旅の名前と日付 / リンク / 注意)。プランの中身は入れない
+  const shareText = (name, year, link) => {
+    const a = dayDate(year, 1), b = dayDate(year, 10);
+    return name + '（' + a.m + '/' + a.d + '〜' + b.m + '/' + b.d + '）の旅のしおりです。\n' + link + '\n※このリンクの人は編集もできます';
+  };
 
   // ---------- 日付 ----------
   function dayDate(year, n) { // n = 1..10 、1/31 が Day1
@@ -77,7 +81,7 @@ const TPLogic = (() => {
     return { m: d.getUTCMonth() + 1, d: d.getUTCDate(), w: d.getUTCDay() };
   }
 
-  const BUILD = '2026-11-16-r2'; // app.js と同じ番号。ちがう組み合わせで読み込まれたら、app.js が気づく
+  const BUILD = '2026-11-16-r3'; // app.js と同じ番号。ちがう組み合わせで読み込まれたら、app.js が気づく
 
   // ---------- ID ----------
   function newId(prefix) {
@@ -551,7 +555,7 @@ const TPLogic = (() => {
   return {
     APP_ID, KINDS, CATEGORIES, CHECK_GROUPS, PROFILE_ICONS, IDEA_TAGS,
     BUILD, parseMoney, fmtUSD, fmtJPY, safeUrl, mapUrl, dayDate, newId,
-    CHOICES, cleanVotes, voters, ballotMap, ballots, agreement, setVote, routeUrl, lineShareUrl, cleanOne, emptyState, sanitize, clone, seedMissing,
+    CHOICES, cleanVotes, voters, ballotMap, ballots, agreement, setVote, routeUrl, shareText, cleanOne, emptyState, sanitize, clone, seedMissing,
     merge, stable, splitEqual, expenseShares, summarize, settle, zeroSumGroups,
     stripForShare, encodeShare, decodeShare, toDoc, docKey,
   };
