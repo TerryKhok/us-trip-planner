@@ -81,7 +81,7 @@ const TPLogic = (() => {
     return { m: d.getUTCMonth() + 1, d: d.getUTCDate(), w: d.getUTCDay() };
   }
 
-  const BUILD = '2026-11-16-r3'; // app.js と同じ番号。ちがう組み合わせで読み込まれたら、app.js が気づく
+  const BUILD = '2026-11-16-r4'; // app.js と同じ番号。ちがう組み合わせで読み込まれたら、app.js が気づく
 
   // ---------- ID ----------
   function newId(prefix) {
@@ -119,16 +119,17 @@ const TPLogic = (() => {
   }
   const voters = idea => (idea.v || []).filter(p => p[1] > 0).map(p => p[0]);
   // 名前 -> 答え('g'|'m'|'n')
-  const ballotMap = idea => new Map((idea.v || []).filter(p => p[1] > 0).map(p => [p[0], p[2] || 'g']));
+  // members を渡すと、いまのメンバーの票だけ数える(削除したメンバーの票は、残っていても数えない)
+  const ballotMap = (idea, members) => new Map((idea.v || []).filter(p => p[1] > 0 && (!members || members.includes(p[0]))).map(p => [p[0], p[2] || 'g']));
   // {g:[名前], m:[名前], n:[名前]}
-  function ballots(idea) {
+  function ballots(idea, members) {
     const out = { g: [], m: [], n: [] };
-    for (const [n, c] of ballotMap(idea)) out[c].push(n);
+    for (const [n, c] of ballotMap(idea, members)) out[c].push(n);
     return out;
   }
   // members: いまのメンバー全員の名前。all=全員が行く / split=行くと行かないが両方 / open=それ以外
   function agreement(idea, members) {
-    const bm = ballotMap(idea), b = ballots(idea);
+    const bm = ballotMap(idea, members), b = ballots(idea, members);
     let tier = 'open';
     if (members.length && members.every(n => bm.get(n) === 'g')) tier = 'all';
     else if (b.g.length && b.n.length) tier = 'split';
@@ -139,6 +140,38 @@ const TPLogic = (() => {
     const t = Math.max(now, old ? Math.abs(old[1]) + 1 : 0);
     const c = CHOICES.includes(choice) ? choice : 'g';
     return cleanVotes((v || []).filter(p => p[0] !== name).concat([on ? (c === 'g' ? [name, t] : [name, t, c]) : [name, -t]]));
+  }
+
+  // ---------- メンバー(プロフィール)の追加と削除 ----------
+  // 名前ごとの票を、取り消しの記録にする(取り消しは、そのあとに届く古い票に勝つ)。取り消した数を返す。
+  function clearVotes(state, name, now) {
+    let n = 0;
+    for (const idea of state.ideas) {
+      if (idea.deleted || !ballotMap(idea).has(name)) continue;
+      idea.v = setVote(idea.v, name, false, now);
+      n++;
+    }
+    return n;
+  }
+  const personInExpense = (state, name) => state.expenses.some(e => !e.deleted && (e.payer === name || (e.shares || []).includes(name) || (e.custom || []).some(p => p[0] === name)));
+  // 削除 = 墓石(新しい時刻の deleted 記録)を置いて、その人の票を取り消す。立て替えに入っている人は削除できない。
+  // 古い端末に残った記録は、時刻の新しい墓石に負ける。もう一度追加(addPerson)したときだけ、その人は戻る。
+  function removePerson(state, name, now) {
+    const i = state.people.findIndex(p => p.id === 'p:' + name);
+    if (i < 0 || state.people[i].deleted) return { ok: false, error: 'not_found' };
+    if (personInExpense(state, name)) return { ok: false, error: 'in_expense' };
+    state.people[i] = { id: 'p:' + name, deleted: true, u: Math.max(now, state.people[i].u + 1) };
+    return { ok: true, votes: clearVotes(state, name, now) };
+  }
+  // 追加・アイコンの更新。いない(または削除済みの)名前を足すときは、残っている古い票を消して、まっさらな新しいメンバーにする。
+  function addPerson(state, name, icon, now) {
+    const c = cleanOne('people', { name, icon });
+    if (!c) return null;
+    const i = state.people.findIndex(p => p.id === c.id);
+    const wasLive = i >= 0 && !state.people[i].deleted;
+    c.u = Math.max(now, i >= 0 ? state.people[i].u + 1 : 0);
+    if (i >= 0) state.people[i] = c; else state.people.push(c);
+    return { created: !wasLive, cleared: wasLive ? 0 : clearVotes(state, c.name, now) };
   }
 
   // ---------- 検証・正規化 ----------
@@ -555,7 +588,7 @@ const TPLogic = (() => {
   return {
     APP_ID, KINDS, CATEGORIES, CHECK_GROUPS, PROFILE_ICONS, IDEA_TAGS,
     BUILD, parseMoney, fmtUSD, fmtJPY, safeUrl, mapUrl, dayDate, newId,
-    CHOICES, cleanVotes, voters, ballotMap, ballots, agreement, setVote, routeUrl, shareText, cleanOne, emptyState, sanitize, clone, seedMissing,
+    CHOICES, cleanVotes, voters, ballotMap, ballots, agreement, setVote, clearVotes, personInExpense, removePerson, addPerson, routeUrl, shareText, cleanOne, emptyState, sanitize, clone, seedMissing,
     merge, stable, splitEqual, expenseShares, summarize, settle, zeroSumGroups,
     stripForShare, encodeShare, decodeShare, toDoc, docKey,
   };

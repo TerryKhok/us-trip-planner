@@ -110,6 +110,10 @@ details.more[open] > summary::before { content: "－ "; }
 .btn.ghost { background: transparent; border-color: var(--line); color: var(--ink); }
 .btn.danger { background: transparent; color: var(--danger); border-color: var(--danger); }
 .btn.small { min-height: 44px; padding: 6px 12px; font-size: .92rem; }
+.pickrows { display: grid; gap: 8px; margin: 8px 0; }
+.pickrow { display: flex; gap: 8px; align-items: stretch; }
+.pickrow > .btn:first-child { flex: 1 1 auto; justify-content: flex-start; text-align: left; }
+.pickrow > .btn.del { flex: 0 0 auto; }
 .btn.wide { width: 100%; }
 .btn.icon { min-width: 44px; min-height: 44px; padding: 0; background: transparent; color: var(--ink2); }
 .btn.icon.danger { border-color: transparent; color: var(--danger); }

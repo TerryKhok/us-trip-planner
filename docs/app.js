@@ -1,7 +1,7 @@
 'use strict';
 /* 旅のしおり: 画面部分。データは端末の localStorage に保存。外部通信は、ライブ共有を設定したときの Supabase だけ。 */
 (() => {
-  const BUILD = '2026-11-16-r3'; // logic.js / sync.js と同じ番号。ちがえば、古い部品が混ざっている
+  const BUILD = '2026-11-16-r4'; // logic.js / sync.js と同じ番号。ちがえば、古い部品が混ざっている
   if (typeof TPSync === 'undefined' || TPLogic.BUILD !== BUILD || TPSync.BUILD !== BUILD) {
     // 古い控えが残っていて、新旧の部品が混ざった。控えを捨てて、1回だけ読み込み直す(それでもだめなら案内を出す)
     let tried = false;
@@ -239,7 +239,13 @@
   const profile = name => live('people').find(p => p.name === name);
   const who = name => (profile(name) ? profile(name).icon + ' ' : '') + name;
   function setMe(name) { me = name; ls.set(KEY.me, name); render(); }
-  function normalizeMe() { if (me && !profile(me)) { me = ''; ls.set(KEY.me, ''); } }
+  let profileGone = false; // 自分のプロフィールが、ほかの端末で削除された
+  function normalizeMe() {
+    if (me && !profile(me)) {
+      if (state.people.some(p => p.deleted && p.id === 'p:' + me)) profileGone = true; // 削除の記録がある = 消された(まだ入っていないだけ、ではない)
+      me = ''; ls.set(KEY.me, '');
+    }
+  }
   function chooseProfile(switchTo, welcome) {
     let icon = L.PROFILE_ICONS[0];
     const name = h('input', { type: 'text', maxlength: 30, placeholder: '例: ゆうた', autocomplete: 'off', 'aria-label': '名前' });
@@ -252,7 +258,9 @@
       return h('div', null,
         welcome ? h('p', { class: 'lead', text: '友だちとは、Discordで送るリンクで一緒に使えます。まずは、名前とアイコンを決めましょう。' }) : null,
         switchTo && existing.length ? h('div', null, h('h3', { text: 'いるメンバーから選ぶ' }),
-          h('div', { class: 'chips' }, existing.map(p => h('button', { type: 'button', class: 'btn small' + (p.name === me ? ' primary' : ''), onclick: () => { setMe(p.name); finish(true); } }, p.icon + ' ' + p.name)))) : null,
+          h('div', { class: 'pickrows' }, existing.map(p => h('div', { class: 'pickrow' },
+            h('button', { type: 'button', class: 'btn small' + (p.name === me ? ' primary' : ''), onclick: () => { setMe(p.name); finish(true); } }, p.icon + ' ' + p.name),
+            h('button', { type: 'button', class: 'btn small danger del', 'aria-label': p.name + ' を削除', onclick: async () => { if (await deletePerson(p.name)) { finish(false); chooseProfile(true); } } }, ic('trash'), '削除'))))) : null,
         h('h3', { text: switchTo && existing.length ? '新しく作る' : '名前とアイコン' }),
         field('名前', name),
         h('p', { class: 'small', text: 'アイコンを選ぶ' }), h('div', { class: 'icons' }, iconBtns),
@@ -265,11 +273,34 @@
           const n = name.value.trim().slice(0, 30);
           if (!n) { setErr('名前を入れてください'); return false; }
           if (!profile(n) && live('people').length >= MAX_PEOPLE) { setErr('メンバーは最大' + MAX_PEOPLE + '人までです'); return false; }
-          upsert('people', { name: n, icon });
+          L.addPerson(state, n, icon, Date.now()); save(); render();
           if (switchTo) setMe(n);
         },
       },
     ]);
+  }
+  // メンバーの削除: 入口はここだけ(プロフィール選びと「お金」タブの×の両方から呼ぶ)。削除したら true
+  async function deletePerson(name) {
+    const refuse = () => modal('削除できません', h('p', { text: who(name) + ' さんは、立て替えの記録に使われています。先にその記録を直すか消してください。' }), [
+      { label: '閉じる', value: false }, { label: 'お金のタブを開く', cls: 'btn primary', value: true }]).then(v => { if (v === true) go('budget'); return false; });
+    if (L.personInExpense(state, name)) return refuse();
+    const votes = live('ideas').filter(i => L.ballotMap(i).has(name)).length;
+    const self = name === me, shared = !!(engine && engine.token);
+    const ok = await modal('メンバーを削除しますか？', h('div', null,
+      h('p', { class: 'lead', text: who(name) + ' さんを削除します。' + (self ? '（いまの自分です）' : '') }),
+      h('ul', { class: 'bul' },
+        h('li', { text: shared ? 'プロフィール（名前とアイコン）が、共有プランの全員の画面から消えます。' : 'プロフィール（名前とアイコン）が消えます。' }),
+        h('li', { text: votes ? 'この人の投票（' + votes + '件）が消えて、候補の人数が変わります。' : 'この人の投票はありません。' }),
+        h('li', { text: 'この人が追加した予定・候補・メモは、そのまま残ります。名前も今までどおり表示されます。' })),
+      h('p', { class: 'hint', text: 'リンクを知っている人はだれでも、メンバーを削除できます（パスワードはありません）。元に戻すには、同じ名前をもう一度追加します。消えた投票は戻りません。' })),
+    [{ label: 'やめる', value: false }, { label: '削除する', cls: 'btn danger', value: true }]);
+    if (ok !== true) return false;
+    const r = L.removePerson(state, name, Date.now());
+    if (!r.ok) { if (r.error === 'in_expense') return refuse(); toast('このメンバーは、すでにいません'); render(); return false; }
+    if (self) { me = ''; ls.set(KEY.me, ''); }
+    save(); render();
+    toast(name + ' さんを削除しました' + (self ? '。名前を選び直してください' : ''));
+    return true;
   }
   function needProfile() {
     normalizeMe();
@@ -441,8 +472,8 @@
     return root;
   }
   function ideaCard(idea, ag, members) {
-    const mine = me ? L.ballotMap(idea).get(me) || null : null;
-    const bl = L.ballots(idea);
+    const mine = me ? L.ballotMap(idea, members).get(me) || null : null;
+    const bl = L.ballots(idea, members);
     const cost = idea.costUSD == null ? '費用: わからない'
       : idea.costUSD === 0 ? '無料'
         : '約$' + idea.costUSD + (rate() ? '（約' + L.fmtJPY(Math.round(idea.costUSD * 100), rate()) + '）' : '');
@@ -587,7 +618,7 @@
     root.append(h('section', { class: 'card' },
       h('div', { class: 'row between' }, h('h2', { class: 'sec', text: 'メンバー（' + people.length + '/' + MAX_PEOPLE + '人）' }),
         btn('追加する', () => chooseProfile(false), 'soft', { disabled: people.length >= MAX_PEOPLE }, 'plus')),
-      people.length ? h('div', { class: 'chips big' }, people.map(n => h('span', { class: 'chip person' }, who(n), h('button', { type: 'button', 'aria-label': n + 'を外す', onclick: () => removePerson(n) }, ic('x')))))
+      people.length ? h('div', { class: 'chips big' }, people.map(n => h('span', { class: 'chip person' }, who(n), h('button', { type: 'button', 'aria-label': n + ' を削除', title: 'このメンバーを削除', onclick: async () => { const wasMe = n === me; if (await deletePerson(n) && wasMe) chooseProfile(true); } }, ic('x')))))
         : h('p', { class: 'lead', text: 'まだメンバーがいません。名前とアイコンを決めて、友だちも足しましょう。' }),
       null));
     root.append(h('section', { class: 'card soft' },
@@ -609,13 +640,6 @@
       h('div', { class: 'item-ops' },
         iconBtn('pencil', e.title + 'を直す', () => expenseForm(e)),
         iconBtn('trash', e.title + 'を消す', async () => { if (await confirmDlg('「' + e.title + '」を消しますか？', '消す', true)) removeEntity('expenses', e.id); }, 'danger')));
-  }
-  async function removePerson(name) {
-    const used = live('expenses').some(e => e.payer === name || e.shares.includes(name) || e.custom.some(p => p[0] === name));
-    if (used) return toast(name + 'さんは立て替えの記録に使われています。先にその記録を直すか消してください');
-    if (!(await confirmDlg(who(name) + ' をメンバーから外しますか？', '外す', true))) return;
-    if (name === me) setMe('');
-    removeEntity('people', 'p:' + name);
   }
   function expenseForm(exp) {
     const people = [...new Set([...livePeople(), ...(exp ? [exp.payer, ...exp.shares, ...exp.custom.map(p => p[0])] : [])])].sort();
@@ -919,6 +943,7 @@
       h('ul', { class: 'bul' },
         h('li', { text: '共有プラン: 「共有」タブの「プランを削除」で、サーバーから完全に消せます（元に戻せません）。' }),
         h('li', { text: '長いあいだ使われない共有プランは、半年ほどで自動的に消えることがあります。' }),
+        h('li', { text: 'メンバー: 名前を選ぶ画面の「削除」か、「お金」タブのメンバーの×で消せます。その人の投票も消えます（予定や候補は残ります）。共有プランでは、全員の画面から消えます。' }),
         h('li', { text: 'この端末の内容: 「共有」タブの「この端末のデータを全部消す」。' }))));
     root.append(sec('写真・アイコンの出典',
       h('p', { text: '場所の写真は、Wikimedia Commons にある自由に使える画像（CC0・パブリックドメイン・CC BY・CC BY-SA）です。それぞれの写真の下に、撮影者・ライセンス・出典を表示しています。アイコンは Lucide（ISCライセンス）です。' }),
@@ -1061,6 +1086,11 @@
       if (b.dataset.tab === tab) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current');
     });
     window.scrollTo(0, y);
+    if (profileGone && !document.querySelector('dialog[open]')) { // ほかの端末で削除された: やさしく知らせて、選び直す
+      profileGone = false;
+      toast('あなたのプロフィールが削除されました。名前を選び直してください');
+      chooseProfile(true);
+    }
   }
   function go(t) {
     if (t !== 'about') ls.set(KEY.tab, t);
