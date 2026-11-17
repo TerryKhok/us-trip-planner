@@ -3,7 +3,7 @@
    写真は、見たものだけを端末に保存する(最初の読み込みを軽くするため、写真は先に全部は保存しない)。
    【更新のとき】写真(img/*.jpg)や data/credits.json を変えたら、必ず下の CACHE の名前を変えること。
    写真は一度保存したら再確認しない(名前が変わると、古い保存が全部捨てられて入れ替わる)。 */
-const CACHE = 'tp-v7';
+const CACHE = 'tp-v9';
 const FILES = ['./', 'index.html', 'style.css', 'app.js', 'logic.js', 'sync.js', 'config.js', 'data/ideas.json', 'data/credits.json', 'manifest.webmanifest', 'icon.svg', 'img/sf-006.jpg'];
 
 self.addEventListener('install', e => {

@@ -710,6 +710,11 @@
         "verified": true,
         "tags": [
             "movies"
+        ],
+        "closed": [
+            1,
+            2,
+            3
         ]
     },
     {
@@ -728,6 +733,9 @@
         "verified": true,
         "tags": [
             "games"
+        ],
+        "closed": [
+            1
         ]
     },
     {
@@ -890,6 +898,9 @@
         "verified": false,
         "tags": [
             "games"
+        ],
+        "closed": [
+            2
         ]
     },
     {
@@ -926,6 +937,10 @@
         "verified": false,
         "tags": [
             "movies"
+        ],
+        "closed": [
+            1,
+            2
         ]
     },
     {

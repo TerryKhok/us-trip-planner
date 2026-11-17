@@ -81,7 +81,7 @@ const TPLogic = (() => {
     return { m: d.getUTCMonth() + 1, d: d.getUTCDate(), w: d.getUTCDay() };
   }
 
-  const BUILD = '2026-11-16-r4'; // app.js と同じ番号。ちがう組み合わせで読み込まれたら、app.js が気づく
+  const BUILD = '2026-11-17-r6'; // app.js と同じ番号。ちがう組み合わせで読み込まれたら、app.js が気づく
 
   // ---------- ID ----------
   function newId(prefix) {
@@ -222,6 +222,7 @@ const TPLogic = (() => {
         duration: S(e.duration, 40), bestTime: S(e.bestTime, 80), tip: S(e.tip, 300),
         mapQuery: S(e.mapQuery, 150), link: safeUrl(e.link || e.sourceUrl), note: S(e.note, 500),
         tags: cleanTags(e.tags), verified: e.verified === true, by: S(e.by, 30), bu: S(e.by, 30) ? U(e.bu) : 0, ed: S(e.ed, 30), v: cleanVotes(e.v), u: U(e.u),
+        ...(cleanClosed(e.closed).length ? { closed: cleanClosed(e.closed) } : {}), // 休館の曜日(0=日..6=土)。ないときはキー自体を作らない
       };
     },
     people: (e) => {
@@ -293,6 +294,8 @@ const TPLogic = (() => {
         else {
           const cur = state[kind][i];
           if (!cur.deleted && cur.u === 0) state[kind][i] = kind === 'ideas' ? Object.assign({}, d, { v: cur.v }) : d;
+          // 自分で直した既定の候補(u>0)にも、休館の曜日(closed)だけは足す。u は変えない(同じファイルから全端末が同じように足すので、マージの結果は変わらない)
+          else if (kind === 'ideas' && !cur.deleted && !cur.vo && d.closed && !cur.closed) cur.closed = d.closed.slice();
         }
       }
       if (opts && opts.prune && kind === 'ideas') {
@@ -308,7 +311,7 @@ const TPLogic = (() => {
     costUSD: '費用', link: 'リンク', area: 'エリア', duration: '所要時間', bestTime: 'おすすめ時間', tip: 'ヒント',
     mapQuery: '地図', verified: '確認済み', cents: '金額', payer: '支払った人', split: '分け方', shares: '負担する人',
     custom: '個別の負担額', text: '内容', done: '完了', year: '年', rate: 'レート', name: '名前', group: '分類',
-    icon: 'アイコン', by: '作った人', ed: '最後に直した人', src: 'もとの候補', tags: 'タグ',
+    icon: 'アイコン', by: '作った人', ed: '最後に直した人', src: 'もとの候補', tags: 'タグ', closed: '休館日',
   };
   function label(kind, e) {
     switch (kind) {
@@ -585,7 +588,211 @@ const TPLogic = (() => {
     return sanitize(JSON.parse(new TextDecoder().decode(bytes)));
   }
 
+  // ---------- スワイプで決める: デッキ(候補の答え) ----------
+  // メンバー = 削除されていない people の名前(名前順)。削除済み(墓石)は、どこでも無視する。
+  const livePeople = state => state.people.filter(p => !p.deleted);
+  const liveMembers = state => livePeople(state).map(p => p.name).sort(byName);
+  const liveIdeas = state => state.ideas.filter(i => !i.deleted && !i.vo);
+  const answerOf = (idea, name) => { const p = (idea.v || []).find(x => x[0] === name); return p && p[1] > 0 ? (p[2] || 'g') : null; };
+  // me がまだ答えていない候補(state の順)。city='San Francisco'|'Los Angeles'、tag='games'|'movies' で絞り込み。me がメンバーでなければ []
+  function deck(state, me, f) {
+    if (!liveMembers(state).includes(me)) return [];
+    const city = (f && f.city) || '', tag = (f && f.tag) || '';
+    return liveIdeas(state).filter(i => answerOf(i, me) === null && (!city || i.city === city) && (!tag || (i.tags || []).includes(tag)));
+  }
+  // 絞り込みに関係なく、me が答えた数 / 候補の数
+  function deckCounts(state, me) {
+    const list = liveIdeas(state);
+    return { answered: list.filter(i => answerOf(i, me) !== null).length, total: list.length };
+  }
+  const memberProgress = state => {
+    const list = liveIdeas(state);
+    return livePeople(state).slice().sort((a, b) => byName(a.name, b.name))
+      .map(p => ({ name: p.name, icon: p.icon, answered: list.filter(i => answerOf(i, p.name) !== null).length, total: list.length }));
+  };
+  // ほかのメンバーの答えの数(自分は数えない)
+  function othersOn(idea, state, me) {
+    const others = liveMembers(state).filter(n => n !== me), out = { g: 0, m: 0, n: 0, others: others.length };
+    for (const n of others) { const a = answerOf(idea, n); if (a) out[a]++; }
+    return out;
+  }
+
+  // ---------- みんなの結果 ----------
+  // 各候補を、いまのメンバーの答えで分ける。最初に当てはまるグループ:
+  // all=全員が行く(メンバー1人以上) / split=行くと行かないが両方 / maybe=迷うが1人以上 / no=行かないだけ(行く・迷うなし) / waiting=残り(答えが1つ以上)
+  function resultGroups(state) {
+    const members = liveMembers(state), list = liveIdeas(state);
+    const groups = { all: [], split: [], maybe: [], no: [], waiting: [] };
+    let unanswered = 0;
+    list.forEach((idea, idx) => {
+      const R = { idea, go: [], maybe: [], no: [], pending: [] };
+      for (const n of members) { const a = answerOf(idea, n); if (a === 'g') R.go.push(n); else if (a === 'm') R.maybe.push(n); else if (a === 'n') R.no.push(n); else R.pending.push(n); }
+      if (R.pending.length === members.length) { unanswered++; return; } // 誰も答えていない(メンバー0人もここ)
+      let g = 'waiting';
+      if (members.length && R.go.length === members.length) g = 'all';
+      else if (R.go.length && R.no.length) g = 'split';
+      else if (R.maybe.length) g = 'maybe';
+      else if (R.no.length) g = 'no';
+      groups[g].push({ R, idx });
+    });
+    for (const g of Object.keys(groups)) groups[g] = groups[g].sort((a, b) => b.R.go.length - a.R.go.length || a.idx - b.idx).map(x => x.R);
+    const total = list.length;
+    const pending = livePeople(state).map(p => p.name).sort(byName)
+      .map(name => ({ name, answered: list.filter(i => answerOf(i, name) !== null).length, total })).filter(p => p.answered < p.total);
+    return { members, groups, unanswered, pending };
+  }
+
+  // ---------- 日程の自動提案 ----------
+  const FREE_DAYS = [2, 3, 5, 6, 7, 8]; // ツアーの日(1,4,9,10日目)は絶対に触らない
+  const DAY_CITY = { 2: 'San Francisco', 3: 'San Francisco', 5: 'Los Angeles', 6: 'Los Angeles', 7: 'Los Angeles', 8: 'Los Angeles' };
+  const CAPACITY = 6.5, BUFFER = 0.5;
+  const PLACEHOLDERS = ['t03', 't04', 't07', 't08', 't09', 't10']; // 既定の「自由時間」。負荷に数えない
+  // 日の都市(日本語で編集されたもの)を認識。両方含む・どちらも含まないときは既定の都市
+  function cityOfText(text, dflt) {
+    const t = String(text || '').toLowerCase();
+    const sf = t.includes('サンフランシスコ') || t.includes('san francisco'), la = t.includes('ロサンゼルス') || t.includes('los angeles');
+    return sf && !la ? 'San Francisco' : la && !sf ? 'Los Angeles' : dflt;
+  }
+  function freeDays(state) {
+    return FREE_DAYS.map(n => {
+      const e = (state.days || []).find(x => x.id === 'd' + n && !x.deleted), dd = dayDate(state.meta.year, n);
+      return { id: 'd' + n, n, city: cityOfText(e && e.city, DAY_CITY[n]), weekday: dd.w, m: dd.m, d: dd.d };
+    });
+  }
+  // 所要時間の文字(日本語)を時間数に。読めなければ 1.5
+  function parseHours(text) {
+    const t = String(text == null ? '' : text).normalize('NFKC').replace(/\s+/g, '');
+    const NUM = '(\\d+(?:\\.\\d+)?)';
+    if (t.includes('半日')) return 4;
+    if (/1日|終日|一日/.test(t)) return 6;
+    let m = new RegExp(NUM + '[〜~\\-–]' + NUM + '(時間|分)').exec(t); // N〜M時間 / N〜M分 は平均
+    if (m) return (Number(m[1]) + Number(m[2])) / 2 / (m[3] === '分' ? 60 : 1);
+    const h = new RegExp(NUM + '時間').exec(t), mi = new RegExp(NUM + '分').exec(t);
+    if (h || mi) return (h ? Number(h[1]) : 0) + (mi ? Number(mi[1]) / 60 : 0);
+    return 1.5;
+  }
+  // 予約が必要・おすすめと「本文に書いてある」ものだけ。値段だけの「チケット」は対象外。
+  const BOOKING_RE = /予約|事前|完売|売り切れ|売切|前売|日時指定/;
+  // 「予約日時や空席状況により変動」のような値段の説明(la-021)は、予約が必要という意味ではないので外す
+  // 「予約なし」「予約不要」を含む文は、まるごと外す(予約は要らない、という意味なので。la-025 の「予約なしでも入れますが、週末は予約が安心です」も印を付けない)
+  const NO_BOOKING_RE = /予約(なし|無し|不要|いらず|は要らな|は不要)/;
+  const needsBooking = idea => BOOKING_RE.test(((idea.note || '') + '\n' + (idea.tip || '')).replace(/予約日時/g, '').split(/(?<=[。\n])/).filter(t => !NO_BOOKING_RE.test(t)).join(''));
+  const cleanClosed = a => [...new Set((Array.isArray(a) ? a : []).filter(x => Number.isInteger(x) && x >= 0 && x <= 6))].sort((x, y) => x - y);
+
+  const BEST = ['午前', '昼', '午後', '夕方', '日没', '夜'], BEST_START = [570, 720, 840, 1020, 1050, 1170]; // 9:30 12:00 14:00 17:00 17:30 19:30
+  const bestRank = idea => { const k = BEST.findIndex(w => (idea.bestTime || '').includes(w)); return k < 0 ? BEST.length : k; }; // 「午後〜夕方」などは先に出てくる方
+  const hhmm = min => String(Math.floor(min / 60)).padStart(2, '0') + ':' + String(min % 60).padStart(2, '0');
+  const itemLoad = hours => hours + BUFFER;
+  const dayLoad = day => day.base + day.items.reduce((s, p) => s + itemLoad(p.hours), 0);
+  // 1日分を並べ替えて時刻を入れ直す(新しい項目だけ。もとからある予定の時刻は見ない)
+  function layoutDay(day) {
+    const items = day.items.slice().sort((a, b) => bestRank(a.idea) - bestRank(b.idea) || a.ord - b.ord);
+    let prevEnd = null;
+    const out = items.map(p => {
+      const r = bestRank(p.idea);
+      let time = '';
+      if (r < BEST.length) {
+        let start = BEST_START[r];
+        if (prevEnd !== null && start < prevEnd + 30) start = Math.ceil((prevEnd + 30) / 15) * 15;
+        if (start <= 23 * 60) { time = hhmm(start); prevEnd = start + Math.round(p.hours * 60); }
+      }
+      return Object.assign({}, p, { time });
+    });
+    return Object.assign({}, day, { items: out, hours: out.reduce((s, p) => s + p.hours, 0), load: dayLoad({ base: day.base, items: out }) });
+  }
+  const closedOn = (idea, day) => (idea.closed || []).includes(day.weekday);
+  const countTentative = days => days.reduce((s, d) => s + d.items.filter(p => p.tentative).length, 0);
+
+  // 提案(決まった手順で、乱数・現在時刻は使わない)。
+  // 候補 = まだ日程にない(src で見つからない)候補。A=全員が行く / B=まだ答えていない人がいて、行かないが0人、行くが過半数(go*2>人数)。
+  // 並び: A→B、行くが多い順、state の順。各候補は「都市が合う・休館でない・入る」日のうち、負荷(時間+0.5/件)が最小の日(同じなら早い日)。
+  // 容量 = 負荷6.5時間。もとからある予定も負荷に数える(src があればその候補の時間、なければ1.5時間。既定の自由時間 t03.. は数えない)。
+  // 1日の `hours` = 新しく入れる項目の時間の合計、`base` = もとからある予定の負荷、`load` = base + 新しい項目(各+0.5)。
+  function planProposal(state) {
+    const members = liveMembers(state), ideas = liveIdeas(state), days = freeDays(state);
+    const inPlan = new Set(state.items.filter(i => !i.deleted && i.src).map(i => i.src));
+    const cands = [];
+    ideas.forEach((idea, idx) => {
+      if (inPlan.has(idea.id) || !members.length) return;
+      const go = [], pending = [];
+      let no = 0;
+      for (const n of members) { const a = answerOf(idea, n); if (a === 'g') go.push(n); else if (a === 'n') no++; else if (a === null) pending.push(n); }
+      if (no) return;
+      if (!pending.length && go.length === members.length) cands.push({ idea, idx, go: go.length, tentative: false, pending });
+      else if (pending.length && go.length * 2 > members.length) cands.push({ idea, idx, go: go.length, tentative: true, pending });
+    });
+    cands.sort((a, b) => (a.tentative - b.tentative) || b.go - a.go || a.idx - b.idx);
+    const hoursOf = idea => parseHours(idea.duration);
+    const dd = days.map(d => {
+      let base = 0;
+      for (const it of state.items) {
+        if (it.deleted || it.day !== d.id || PLACEHOLDERS.includes(it.id)) continue;
+        const src = it.src && ideas.find(i => i.id === it.src);
+        base += itemLoad(src ? hoursOf(src) : 1.5);
+      }
+      return Object.assign({}, d, { items: [], hours: 0, base, load: base });
+    });
+    const leftovers = [];
+    cands.forEach((c, ord) => {
+      const h = hoursOf(c.idea), sameCity = dd.filter(d => d.city === c.idea.city);
+      let reason = null, best = null;
+      if (!dd.length) reason = 'nofreeday';
+      else if (!sameCity.length) reason = 'city';
+      else {
+        const open = sameCity.filter(d => !closedOn(c.idea, d));
+        if (!open.length) reason = 'closed';
+        else {
+          for (const d of open) if (d.load + itemLoad(h) <= CAPACITY && (!best || d.load < best.load)) best = d; // 同じ負荷なら早い日(先に見つけた方)
+          if (!best) reason = 'capacity';
+        }
+      }
+      if (!best) { leftovers.push({ idea: c.idea, reason }); return; }
+      best.items.push({ idea: c.idea, hours: h, time: '', tentative: c.tentative, booking: needsBooking(c.idea), pending: c.pending, ord });
+      best.load += itemLoad(h);
+    });
+    const out = dd.map(layoutDay);
+    return { days: out, leftovers, tentative: countTentative(out) };
+  }
+  // 項目を別の日へ。入力は変更しない。 { ok:true, plan } | { ok:false, error:'closed'|'city'|'capacity'|'fixed'|'unknown' }
+  function planMove(plan, ideaId, toDayId) {
+    const from = plan.days.find(d => d.items.some(p => p.idea.id === ideaId));
+    if (!from) return { ok: false, error: 'unknown' };
+    const to = plan.days.find(d => d.id === toDayId);
+    if (!to) return { ok: false, error: [1, 4, 9, 10].some(n => 'd' + n === toDayId) ? 'fixed' : 'unknown' };
+    const p = from.items.find(x => x.idea.id === ideaId);
+    if (to.id === from.id) return { ok: true, plan: clone(plan) };
+    if (to.city !== p.idea.city) return { ok: false, error: 'city' };
+    if (closedOn(p.idea, to)) return { ok: false, error: 'closed' };
+    if (dayLoad(to) + itemLoad(p.hours) > CAPACITY) return { ok: false, error: 'capacity' };
+    const days = plan.days.map(d => {
+      if (d.id === from.id) return layoutDay(Object.assign({}, d, { items: d.items.filter(x => x.idea.id !== ideaId) }));
+      if (d.id === to.id) return layoutDay(Object.assign({}, d, { items: d.items.concat([p]) }));
+      return d;
+    });
+    return { ok: true, plan: clone({ days, leftovers: plan.leftovers, tentative: countTentative(days) }) };
+  }
+  function planRemove(plan, ideaId) {
+    const days = plan.days.map(d => (d.items.some(p => p.idea.id === ideaId) ? layoutDay(Object.assign({}, d, { items: d.items.filter(p => p.idea.id !== ideaId) })) : d));
+    return clone({ days, leftovers: plan.leftovers, tentative: countTentative(days) });
+  }
+  // 提案を、ふつうの日程の項目に(upsert できる形)。now と by は呼ぶ側が渡す
+  function planToItems(plan, opts) {
+    const by = (opts && opts.by) || '', now = (opts && opts.now) || 0, out = [];
+    for (const d of plan.days) {
+      for (const p of d.items) {
+        const idea = p.idea;
+        out.push(cleanOne('items', {
+          id: newId('i'), day: d.id, time: p.time, title: idea.title, place: idea.area, mapQuery: idea.mapQuery || (idea.title + ' ' + idea.city),
+          note: p.tentative ? 'まだ答えていない人がいます' : '', type: 'free', src: idea.id, by, bu: now, ed: by, u: now,
+        }));
+      }
+    }
+    return out.filter(Boolean);
+  }
+
   return {
+    resultGroups, freeDays, parseHours, needsBooking, planProposal, planMove, planRemove, planToItems,
+    liveMembers, liveIdeas, answerOf, deck, deckCounts, memberProgress, othersOn,
     APP_ID, KINDS, CATEGORIES, CHECK_GROUPS, PROFILE_ICONS, IDEA_TAGS,
     BUILD, parseMoney, fmtUSD, fmtJPY, safeUrl, mapUrl, dayDate, newId,
     CHOICES, cleanVotes, voters, ballotMap, ballots, agreement, setVote, clearVotes, personInExpense, removePerson, addPerson, routeUrl, shareText, cleanOne, emptyState, sanitize, clone, seedMissing,

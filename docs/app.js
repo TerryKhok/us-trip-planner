@@ -1,7 +1,7 @@
 'use strict';
 /* 旅のしおり: 画面部分。データは端末の localStorage に保存。外部通信は、ライブ共有を設定したときの Supabase だけ。 */
 (() => {
-  const BUILD = '2026-11-16-r4'; // logic.js / sync.js と同じ番号。ちがえば、古い部品が混ざっている
+  const BUILD = '2026-11-17-r6'; // logic.js / sync.js と同じ番号。ちがえば、古い部品が混ざっている
   if (typeof TPSync === 'undefined' || TPLogic.BUILD !== BUILD || TPSync.BUILD !== BUILD) {
     // 古い控えが残っていて、新旧の部品が混ざった。控えを捨てて、1回だけ読み込み直す(それでもだめなら案内を出す)
     let tried = false;
@@ -15,7 +15,7 @@
   }
   try { sessionStorage.removeItem('tp.stale'); } catch (e) { /* そのまま */ } // 部品がそろっているので、次に混ざったときもう一度直せる
   const L = TPLogic;
-  const KEY = { state: 'tp.state.v1', me: 'tp.me', tab: 'tp.tab', backup: 'tp.backup.v1', room: 'tp.room', backupJoin: 'tp.backup.join', seen: 'tp.seen' };
+  const KEY = { state: 'tp.state.v1', me: 'tp.me', tab: 'tp.tab', backup: 'tp.backup.v1', room: 'tp.room', backupJoin: 'tp.backup.join', seen: 'tp.seen', ideamode: 'tp.ideamode', lastplan: 'tp.lastplan' };
   // ライブ共有の設定(config.js)。空ならこの端末だけで使う(従来どおり)
   const CFG = window.TP_CONFIG || {};
   const LIVE_ON = (() => {
@@ -97,6 +97,11 @@
   let engine = null, applying = false, syncStatus = 'local', syncInfo = '', pendingRender = false;
   let fCity = '', fCat = '', fTag = '', checkEdit = false;
   let credits = {};
+  // スワイプのデッキ: 表示のしかた(この端末に覚える)・いまの画面・絞り込み・アニメーション中の印
+  let ideaMode = ls.get(KEY.ideamode) === 'list' ? 'list' : 'deck';
+  let ideaScreen = 'main'; // 'main' | 'result' | 'plan'
+  let dCity = '', dTag = '', deckBusy = false, dragging = false, dragTimer = 0, deferredRender = false, pinTop = '', deckTop = null, plan = null, planMsg = '';
+  const undoStack = [], seenMilestone = new Set();
   const PRICE_ASOF = '2026年時点'; // 確認済みの金額を調べた年(データの注記による)
   const TAG_MARK = { games: ['gamepad-2', 'ゲーム'], movies: ['clapperboard', '映画'] };
 
@@ -160,11 +165,12 @@
   const field = (label, input, hint) => h('label', { class: 'f' }, h('span', { text: label }), input, hint ? h('small', { class: 'hint', text: hint }) : null);
   const range = (a, b) => Array.from({ length: b - a + 1 }, (_, i) => a + i);
 
-  function toast(msg) {
+  function toast(msg, ms, cls) {
     const box = document.getElementById('toast');
-    const el = h('div', { text: msg });
+    if (cls) box.querySelectorAll('.' + cls).forEach(x => x.remove()); // 同じ種類は1つだけ(つづけて答えても、たまらない)
+    const el = h('div', { text: msg, class: cls });
     box.append(el);
-    setTimeout(() => el.remove(), 4800);
+    setTimeout(() => el.remove(), ms || 4800);
   }
 
   function modal(title, body, actions) {
@@ -221,12 +227,12 @@
     save(); render();
     return true;
   }
-  function removeEntity(kind, id) {
+  function removeEntity(kind, id, quiet) {
     const arr = state[kind];
     const i = arr.findIndex(x => x.id === id);
     if (i < 0) return;
     arr[i] = L.cleanOne(kind, { id, deleted: true, u: Math.max(Date.now(), arr[i].u + 1), by: arr[i].by, bu: arr[i].bu, ed: me || arr[i].ed, v: arr[i].v });
-    save(); render();
+    save(); if (!quiet) render();
   }
   function setMeta(changes) {
     const m = Object.assign({}, state.meta, changes);
@@ -332,20 +338,22 @@
   }
 
   // 写真(Wikimedia Commons の自由な画像)。クレジットを必ず表示する。写真がないときは色のブロックにする。
-  function creditLine(id) {
+  function creditLine(id, compact) {
     const c = credits[id];
     if (!c) return null;
-    return h('figcaption', { class: 'cr' },
+    return h('figcaption', { class: 'cr' + (compact ? ' s' : '') },
       c.caption ? h('span', { class: 'cap', text: c.caption }) : null, // 別の(近くの・姉妹の)場所の写真のときの注記
       h('span', null, '写真: ' + (c.author || '作者不明') + ' / ',
         c.licenseUrl ? h('a', { href: c.licenseUrl, target: '_blank', rel: 'noopener noreferrer' }, c.license) : c.license,
-        ' / ', h('a', { href: c.sourceUrl, target: '_blank', rel: 'noopener noreferrer' }, 'Commonsの写真ページ'), c.modified ? '（大きさを変更）' : ''));
+        ' / ', h('a', { href: c.sourceUrl, target: '_blank', rel: 'noopener noreferrer' }, compact ? '出典' : 'Commonsの写真ページ'), c.modified ? '（大きさを変更）' : ''));
   }
-  function photoBlock(id, title, category, city) {
+  // o.eager: すぐ読み込む(デッキの一番上) / o.compact: クレジットを短く(結果の小さなカード)。クレジットは、どちらでも必ず写真のすぐ下に出す
+  function photoBlock(id, title, category, city, o) {
+    o = o || {};
     const blank = () => h('div', { class: 'ph ph-none', 'aria-hidden': 'true' }, ic(CAT_ICON[category] || 'map-pin', 'big'), h('span', { text: cityLabel(city || '') }));
     if (!credits[id]) return blank();
-    const img = h('img', { src: 'img/' + id + '.jpg', alt: title + 'の写真', loading: 'lazy', decoding: 'async', width: 640, height: 360 });
-    const fig = h('figure', { class: 'ph' }, img, creditLine(id));
+    const img = h('img', { src: 'img/' + id + '.jpg', alt: title + 'の写真', loading: o.eager ? 'eager' : 'lazy', decoding: 'async', width: 640, height: 360 });
+    const fig = h('figure', { class: 'ph' }, img, creditLine(id, o.compact));
     img.addEventListener('error', () => fig.replaceWith(blank())); // 壊れた画像のマークは出さない
     return fig;
   }
@@ -354,6 +362,8 @@
   function viewItinerary() {
     const root = h('div', { class: 'stack' });
     root.append(h('datalist', { id: 'cities' }, h('option', { value: 'サンフランシスコ' }), h('option', { value: 'ロサンゼルス' })));
+    const auto = lastPlanLive().length; // 自動プランで入れた予定が残っている間だけ、取り消しのボタンを出す
+    if (auto) root.append(h('section', { class: 'card soft undo-note' }, h('p', { class: 'lead', text: '自動プランで' + auto + '件入れました。' }), undoPlanBtn()));
     for (let n = 1; n <= 10; n++) root.append(dayCard(n));
     const yearIn = h('input', {
       id: 'yr', type: 'number', min: 2000, max: 2100, value: state.meta.year,
@@ -384,7 +394,7 @@
         : (stops.length === 1 ? h('p', { class: 'one-stop' }, mapLink(stops[0], 'この日の場所を地図で見る')) : null),
       h('div', { class: 'row gap' },
         btn('予定を足す', () => needProfile().then(m => m && itemForm(null, id)), '', null, 'plus'),
-        btn('候補から入れる', () => go('ideas'), 'ghost', null, 'lightbulb')));
+        btn('候補から入れる', () => { ideaMode = 'list'; ideaScreen = 'main'; go('ideas'); }, 'ghost', null, 'lightbulb'))); // 日に入れるのは一覧で(次に開くときは、覚えた表示に戻る)
     return h('section', { class: 'card day', 'aria-label': dayLabel(n) },
       h('div', { class: 'day-head' },
         h('div', { class: 'day-no' }, h('span', { class: 'n', text: String(n) }), h('span', { class: 'u', text: '日目' })),
@@ -441,7 +451,28 @@
     const members = livePeople();
     return live('ideas').filter(i => { const a = L.agreement(i, members); return a.answered > 0 && a.tier !== 'all' && !addedDays(i).length; }).length;
   };
+  // 費用の言い方と「目安・未確認」の決まりは、一覧とデッキで同じものを使う
+  function ideaChips(idea) {
+    const cost = idea.costUSD == null ? '費用: わからない'
+      : idea.costUSD === 0 ? '無料'
+        : '約$' + idea.costUSD + (rate() ? '（約' + L.fmtJPY(Math.round(idea.costUSD * 100), rate()) + '）' : '');
+    const estimate = !idea.verified && (idea.costUSD != null || /ドル/.test((idea.note || '') + (idea.tip || ''))); // 本文にドルの金額があるときも
+    const asOf = idea.verified && idea.costUSD != null; // 確認済みの金額も、調べた年を出す
+    return h('p', { class: 'chips' },
+      h('span', { class: 'chip', text: CAT_JP[idea.category] }),
+      (idea.tags || []).filter(t => TAG_MARK[t]).map(t => h('span', { class: 'chip tag' }, ic(TAG_MARK[t][0]), TAG_MARK[t][1])),
+      h('span', { class: 'chip', text: cost }),
+      idea.duration ? h('span', { class: 'chip', text: idea.duration }) : null,
+      estimate ? h('span', { class: 'chip warn', text: '目安・未確認' }) : null,
+      asOf ? h('span', { class: 'chip', text: PRICE_ASOF }) : null);
+  }
   function viewIdeas() {
+    const deckMode = ideaMode === 'deck';
+    const root = !deckMode ? viewIdeaList() : ideaScreen === 'result' ? viewResult() : ideaScreen === 'plan' ? viewPlan() : viewDeck();
+    if (!deckMode || ideaScreen === 'main') root.prepend(ideaSwitch());
+    return root;
+  }
+  function viewIdeaList() {
     const root = h('div', { class: 'stack' });
     const all = live('ideas'), members = livePeople();
     const cities = [...new Set(all.map(i => i.city).filter(Boolean))].sort();
@@ -474,11 +505,6 @@
   function ideaCard(idea, ag, members) {
     const mine = me ? L.ballotMap(idea, members).get(me) || null : null;
     const bl = L.ballots(idea, members);
-    const cost = idea.costUSD == null ? '費用: わからない'
-      : idea.costUSD === 0 ? '無料'
-        : '約$' + idea.costUSD + (rate() ? '（約' + L.fmtJPY(Math.round(idea.costUSD * 100), rate()) + '）' : '');
-    const estimate = !idea.verified && (idea.costUSD != null || /ドル/.test((idea.note || '') + (idea.tip || ''))); // 本文にドルの金額があるときも
-    const asOf = idea.verified && idea.costUSD != null; // 確認済みの金額も、調べた年を出す
     const days = addedDays(idea);
     const vote = h('div', { class: 'vote', role: 'group', 'aria-label': idea.title + 'に行くか答える' },
       CHOICES.map(([c, label, icon]) => h('button', { type: 'button', class: 'vbtn v-' + c + (mine === c ? ' on' : ''), 'aria-pressed': String(mine === c), onclick: () => setAnswer(idea.id, c) }, ic(icon), label)));
@@ -497,13 +523,7 @@
             iconBtn('pencil', idea.title + 'を直す', () => ideaForm(idea)),
             iconBtn('trash', idea.title + 'を消す', async () => { if (await confirmDlg('「' + idea.title + '」を消しますか？', '消す', true)) removeEntity('ideas', idea.id); }, 'danger'))),
         h('h3', { class: 'idea-title', text: idea.title }),
-        h('p', { class: 'chips' },
-          h('span', { class: 'chip', text: CAT_JP[idea.category] }),
-          (idea.tags || []).filter(t => TAG_MARK[t]).map(t => h('span', { class: 'chip tag' }, ic(TAG_MARK[t][0]), TAG_MARK[t][1])),
-          h('span', { class: 'chip', text: cost }),
-          idea.duration ? h('span', { class: 'chip', text: idea.duration }) : null,
-          estimate ? h('span', { class: 'chip warn', text: '目安・未確認' }) : null,
-          asOf ? h('span', { class: 'chip', text: PRICE_ASOF }) : null),
+        ideaChips(idea),
         idea.note ? h('p', { class: 'note', text: idea.note }) : null,
         idea.bestTime ? h('p', { class: 'small', text: 'おすすめの時間: ' + idea.bestTime }) : null,
         idea.tip ? h('p', { class: 'small', text: 'ヒント: ' + idea.tip }) : null,
@@ -566,6 +586,398 @@
         },
       },
     ]);
+  }
+
+  // ================= スワイプで決める(候補のデッキ・みんなの結果・自動プラン) =================
+  const ANS_JP = { g: '行く', m: '迷う', n: '行かない' };
+  const SWIPE_PX = 90, DEAD_PX = 8, UNDO_MAX = 20, ANSWER_TOAST_MS = 3000, VEL_WINDOW_MS = 100, DRAG_MAX_MS = 10000, DRAG_AWAY_MS = 2000;
+  const MILESTONE = { 10: 'いい調子！10枚答えました', 25: 'すごい！25枚答えました', 50: 'あと少し！50枚答えました' };
+  const FLY_MS = 230, FADE_MS = 140;
+  const reduceMotion = () => !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
+  let sayT = 0;
+  const say = t => { const el = document.getElementById('say'); clearTimeout(sayT); if (!el) return; /* 古いindex.htmlが残っている最初の1回だけ、ない */ el.textContent = ''; if (t) sayT = setTimeout(() => { el.textContent = t; }, 60); }; // 読み上げ用(画面には出さない)。say('') で消す
+  // 指がカードに触れている間は、画面を作り直さない(同期で届いた変更は、指を離したあとに反映する)。10秒たてば必ず解除する
+  const endDrag = () => { dragging = false; clearTimeout(dragTimer); };
+  const armDrag = ms => { clearTimeout(dragTimer); dragTimer = setTimeout(() => { dragging = false; flushRender(); }, ms); }; // 指の最後の知らせが来なくても、時間がたてば解除する
+  const flushRender = () => { if (deferredRender && !deckBusy && !dragging) render(); };
+  const hook = note => { const s = String(note || '').split('。')[0].trim(); return s.length > 60 ? s.slice(0, 59) + '…' : s; };
+  const enterDeck = () => { ideaMode = 'deck'; ideaScreen = 'main'; ls.set(KEY.ideamode, 'deck'); go('ideas'); };
+  function setMode(m) { ideaMode = m; ideaScreen = 'main'; ls.set(KEY.ideamode, m); render(); window.scrollTo(0, 0); }
+  function ideaSwitch() {
+    return h('div', { class: 'seg two', role: 'group', 'aria-label': '候補の見かた' },
+      [['deck', 'スワイプ', 'layers'], ['list', '一覧', 'list']].map(([m, text, icon]) => h('button', {
+        type: 'button', class: 'seg-btn' + (ideaMode === m ? ' on' : ''), 'aria-pressed': String(ideaMode === m), onclick: () => setMode(m),
+      }, ic(icon), text)));
+  }
+  const backBtn = (label, to) => btn(label, () => { ideaScreen = to; render(); window.scrollTo(0, 0); }, 'ghost small', null, 'arrow-left');
+
+  // ---- デッキ ----
+  const deckList = () => {
+    let d = L.deck(state, me, { city: dCity, tag: dTag });
+    const p = pinTop && d.find(i => i.id === pinTop);
+    if (p) d = [p].concat(d.filter(i => i !== p)); else pinTop = '';
+    return d;
+  };
+  function filterRow() {
+    const chip = (text, icon, on, fn) => h('button', { type: 'button', class: 'fchip' + (on ? ' on' : ''), 'aria-pressed': String(on), onclick: fn }, icon ? ic(icon) : null, text);
+    const set = (c, t) => () => { dCity = c; dTag = t; pinTop = ''; render(); };
+    return h('div', { class: 'fchips', role: 'group', 'aria-label': 'デッキの絞り込み' },
+      chip('全部', null, !dCity && !dTag, set('', '')),
+      chip('サンフランシスコ', null, dCity === 'San Francisco', set(dCity === 'San Francisco' ? '' : 'San Francisco', dTag)),
+      chip('ロサンゼルス', null, dCity === 'Los Angeles', set(dCity === 'Los Angeles' ? '' : 'Los Angeles', dTag)),
+      chip('ゲーム', 'gamepad-2', dTag === 'games', set(dCity, dTag === 'games' ? '' : 'games')),
+      chip('映画', 'clapperboard', dTag === 'movies', set(dCity, dTag === 'movies' ? '' : 'movies')));
+  }
+  function memberStrip(counts) {
+    const mp = L.memberProgress(state);
+    if (!mp.length) return null;
+    const ahead = mp.filter(p => p.name !== me && p.answered > counts.answered).sort((a, b) => b.answered - a.answered)[0];
+    return h('div', { class: 'mstrip' },
+      h('ul', { class: 'plain mem', 'aria-label': 'みんなの回答の進み具合' }, mp.map(p => {
+        const ring = h('span', { class: 'ring', 'aria-hidden': 'true' }, h('span', { class: 'ico', text: p.icon }));
+        ring.style.setProperty('--p', String(p.total ? Math.round(p.answered * 100 / p.total) : 0));
+        return h('li', { class: 'mem-i' + (p.name === me ? ' me' : '') }, ring,
+          h('span', { class: 'mn', 'aria-hidden': 'true', text: p.name }),
+          h('span', { class: 'mc', 'aria-hidden': 'true', text: p.answered + '/' + p.total }),
+          h('span', { class: 'sr', text: p.name + 'さん ' + p.answered + '/' + p.total + '回答' }));
+      })),
+      ahead ? h('p', { class: 'small ahead', text: ahead.name + 'さんは ' + ahead.answered + '/' + ahead.total + ' 回答' }) : null);
+  }
+  function viewDeck() {
+    deckTop = null;
+    const root = h('div', { class: 'stack deckpage' });
+    const ideas = live('ideas');
+    if (!ideas.length) {
+      root.append(h('section', { class: 'card empty' }, h('p', { class: 'empty-t', text: ideasMsg ? '候補を読み込めませんでした' : '候補を読み込んでいます…' }), ideasMsg ? h('p', { class: 'hint', text: ideasMsg }) : null));
+      return root;
+    }
+    if (!me) {
+      root.append(h('section', { class: 'card empty' }, h('p', { class: 'empty-t', text: '名前を決めよう' }),
+        h('p', { class: 'lead', text: '名前とアイコンを決めると、カードに「行く」「迷う」「行かない」で答えられます。' }),
+        btn('名前を決める', () => chooseProfile(true), 'primary')));
+      return root;
+    }
+    const counts = L.deckCounts(state, me), cards = deckList();
+    const left = counts.total - counts.answered, filtered = !!(dCity || dTag);
+    root.append(filterRow());
+    root.append(h('div', { class: 'dprog' },
+      h('progress', { value: counts.answered, max: Math.max(1, counts.total), 'aria-label': '答えた数' }),
+      h('p', { class: 'dprog-t' }, h('strong', { text: counts.answered + ' / ' + counts.total }), '・あと' + left + '枚', filtered ? h('span', { class: 'sub', text: '（この絞り込みは' + cards.length + '枚）' }) : null)));
+    const strip = memberStrip(counts);
+    if (!cards.length) {
+      const done = left === 0;
+      root.append(h('section', { class: 'card empty fin' },
+        h('p', { class: 'empty-t', text: done ? 'ぜんぶ答えました！' : 'この絞り込みは終わりました' }),
+        h('p', { class: 'lead', text: done ? 'おつかれさま！みんなの答えを見てみましょう。' : '別の絞り込みにするか、全部に戻してください。' }),
+        done ? btn('みんなの結果を見る', () => { ideaScreen = 'result'; render(); window.scrollTo(0, 0); }, 'primary', null, 'users')
+          : btn('全部に戻す', () => { dCity = ''; dTag = ''; render(); }, 'primary')));
+    } else {
+      const top = cards[0], el = deckCard(top);
+      deckTop = { idea: top, el };
+      cards.slice(1, 3).forEach(i => { if (credits[i.id]) { const im = new Image(); im.src = 'img/' + i.id + '.jpg'; } }); // 次の2枚の写真だけ先に読む
+      root.append(h('div', { class: 'deck' }, cards.length > 1 ? h('div', { class: 'dpeek', 'aria-hidden': 'true' }) : null, el));
+      const abtn = (c, icon) => h('button', { type: 'button', class: 'abtn v-' + c, 'aria-label': top.title + 'に' + ANS_JP[c] + 'と答える', onclick: () => answerNow(top, c, el, '.abtn.v-' + c) }, ic(icon), ANS_JP[c]);
+      root.append(h('div', { class: 'abar' }, abtn('n', 'circle-x'), abtn('m', 'help'), abtn('g', 'circle-check'))); // カードのすぐ下(重ねない)
+    }
+    root.append(h('div', { class: 'row gap dtools' },
+      btn('戻す', undoLast, 'ghost small', { disabled: !undoStack.length }, 'rotate-ccw'),
+      btn('みんなの結果', () => { ideaScreen = 'result'; render(); window.scrollTo(0, 0); }, 'soft small', null, 'users'),
+      btn('候補を足す', () => needProfile().then(m => m && ideaForm(null)), 'ghost small', null, 'plus')));
+    if (strip) root.append(strip);
+    root.append(h('p', { class: 'hint', text: '右にスワイプ=行く、左=行かない、上=迷う。ボタンやキー（→ ← ↑）でも答えられます。金額は目安です。' }));
+    root.append(footerLinks());
+    return root;
+  }
+  function deckCard(idea) {
+    const g = hook(idea.note);
+    // タイトルは写真の下側に重ねる(暗い帯の上に白い文字)。写真のクレジットは、写真のすぐ下に必ず出る
+    const el = h('article', { class: 'dcard', tabindex: '0', 'aria-label': idea.title + '。右で行く、左で行かない、上で迷う' },
+      h('div', { class: 'dmedia' },
+        photoBlock(idea.id, idea.title, idea.category, idea.city, { eager: true }),
+        h('div', { class: 'dover' },
+          h('p', { class: 'kicker' }, ic(CAT_ICON[idea.category] || 'map-pin'), [cityLabel(idea.city), idea.area].filter(Boolean).join(' ・ ')),
+          h('h3', { class: 'dtitle', text: idea.title })),
+        h('button', { type: 'button', class: 'more-btn', 'aria-label': idea.title + 'のくわしい情報を開く', onclick: () => showDetail(idea, false) }, ic('info'), 'くわしく')),
+      h('div', { class: 'dbody' }, ideaChips(idea), g ? h('p', { class: 'hook', text: g }) : null),
+      ['g', 'm', 'n'].map(c => h('span', { class: 'stamp s-' + c, 'aria-hidden': 'true', text: ANS_JP[c] })));
+    attachDrag(el, idea);
+    return el;
+  }
+  // 指でカードを動かす。8px までは動かない。右/左に90px以上=行く/行かない、上に90px以上=迷う。はじく動きも同じ
+  function attachDrag(el, idea) {
+    let pid = null, sx = 0, sy = 0, dx = 0, dy = 0, moved = false, hist = [];
+    const strengths = () => ({ g: dx / SWIPE_PX, n: -dx / SWIPE_PX, m: Math.abs(dy) > Math.abs(dx) ? -dy / SWIPE_PX : 0 });
+    const paint = () => {
+      el.style.transform = 'translate(' + dx + 'px,' + dy + 'px) rotate(' + (dx / 18).toFixed(2) + 'deg)';
+      const s = strengths(), best = ['g', 'm', 'n'].reduce((a, c) => (s[c] > s[a] ? c : a), 'g');
+      for (const c of ['g', 'm', 'n']) el.style.setProperty('--o' + c, c === best ? String(Math.max(0, Math.min(1, s[c]))) : '0');
+    };
+    const reset = () => { el.classList.remove('drag'); el.style.removeProperty('transform'); ['g', 'm', 'n'].forEach(c => el.style.removeProperty('--o' + c)); };
+    const snap = () => {
+      if (reduceMotion()) return reset();
+      el.classList.add('snap'); reset();
+      setTimeout(() => el.classList.remove('snap'), 300);
+    };
+    // 指の動きの決め方: 下に向かう縦の動きはページのスクロール(カードは動かさない)。横または上への動きがカードのドラッグ
+    let mode = '';
+    const decide = (ddx, ddy, touch) => {
+      if (Math.hypot(ddx, ddy) < DEAD_PX) return '';
+      if (!touch) return 'drag'; // マウス・ペンは、スクロールがないので、いつもドラッグ
+      return ddy > 0 && ddy > Math.abs(ddx) * 1.5 ? 'scroll' : 'drag';
+    };
+    el.addEventListener('pointerdown', e => {
+      if (deckBusy || pid !== null || (e.pointerType === 'mouse' && e.button !== 0) || e.target.closest('a,button')) return;
+      pid = e.pointerId; sx = e.clientX; sy = e.clientY; dx = dy = 0; moved = false; mode = ''; hist = [[e.timeStamp, sx, sy]];
+      dragging = true; armDrag(DRAG_MAX_MS);
+      el.classList.remove('snap');
+    });
+    el.addEventListener('pointermove', e => {
+      if (e.pointerId !== pid) return;
+      dx = e.clientX - sx; dy = e.clientY - sy;
+      if (!mode) {
+        mode = decide(dx, dy, e.pointerType === 'touch' || e.pointerType === 'pen');
+        if (!mode) return;
+        if (mode === 'scroll') { pid = null; endDrag(); flushRender(); return; } // ブラウザにスクロールをまかせる
+        try { el.setPointerCapture(pid); } catch (err) { /* そのまま */ }
+      }
+      if (!moved) { moved = true; el.classList.add('drag'); }
+      hist.push([e.timeStamp, e.clientX, e.clientY]); if (hist.length > 6) hist.shift();
+      paint();
+    });
+    // タッチでは、横・上のドラッグと決めたあとだけ、ページのスクロールを止める(はじめの動きで決める)
+    el.addEventListener('touchmove', e => {
+      const t = e.touches[0];
+      if (!t || pid === null || !e.cancelable) return;
+      if (!mode) { const m = decide(t.clientX - sx, t.clientY - sy, true); if (m === 'drag') e.preventDefault(); return; }
+      if (mode === 'drag') e.preventDefault();
+    }, { passive: false });
+    const end = e => {
+      if (e.pointerId !== pid) return;
+      pid = null; endDrag();
+      try { el.releasePointerCapture(e.pointerId); } catch (err) { /* そのまま */ }
+      if (!moved) { flushRender(); return; }
+      // はじく速さは、離す直前100ミリ秒の動きだけで決める(長く止めたあとは0)
+      let vx = 0, vy = 0;
+      const b = hist[hist.length - 1], a = b && hist.find(p => b[0] - p[0] <= VEL_WINDOW_MS);
+      if (b && a && e.timeStamp - b[0] <= VEL_WINDOW_MS && b[0] > a[0]) { vx = (b[1] - a[1]) / (b[0] - a[0]); vy = (b[2] - a[2]) / (b[0] - a[0]); }
+      const c = e.type !== 'pointerup' ? '' : swipeChoice(dx, dy, vx, vy);
+      if (c) answerNow(idea, c, el); else { snap(); setTimeout(flushRender, reduceMotion() ? 0 : 300); }
+    };
+    el.addEventListener('pointerup', end);
+    el.addEventListener('pointercancel', end);
+    el.addEventListener('lostpointercapture', end);
+  }
+  function swipeChoice(dx, dy, vx, vy) {
+    const ax = Math.abs(dx), ay = Math.abs(dy);
+    if (dy < -SWIPE_PX && ay > ax) return 'm';
+    if (ax > SWIPE_PX) return dx > 0 ? 'g' : 'n';
+    if (Math.hypot(vx, vy) > 0.6 && Math.hypot(dx, dy) > 40) { // はじいた
+      if (dy < 0 && Math.abs(vy) > Math.abs(vx)) return 'm';
+      if (Math.abs(vx) >= Math.abs(vy)) return vx > 0 ? 'g' : 'n';
+    }
+    return '';
+  }
+  // みんなの答えは、自分が答えたあとに、答えた場所の名前つきで知らせる(つぎのカードの上には、何も出さない)
+  const shortName = t => { const k = String(t).search(/[\s(（]/); const n = (k > 0 ? String(t).slice(0, k) : String(t)); return n.length > 12 ? n.slice(0, 12) + '…' : n; };
+  const revealText = o => {
+    if (!o.others) return '';
+    const parts = [['g', '行く'], ['m', '迷う'], ['n', '行かない']].filter(([c]) => o[c]).map(([c, t]) => o[c] + '人が' + t);
+    return parts.length ? 'ほかに' + parts.join('・') : 'あなたが一番乗り！';
+  };
+  // 答えを保存して、カードを飛ばす。アニメーション中は画面を作り直さない(deckBusy)
+  const refocus = sel => { if (!sel) return; const b = document.querySelector(sel); if (b && !b.disabled) b.focus(); }; // 画面を作り直しても、押したボタンにキーボードの位置を戻す
+  function answerNow(idea, choice, el, focusSel) {
+    if (deckBusy) return;
+    if (!me) { needProfile(); return; }
+    const cur = state.ideas.find(i => i.id === idea.id && !i.deleted); // 同期で state が入れかわっても、いまの候補に答える
+    if (!cur) { flushRender(); return; }
+    idea = cur;
+    deckBusy = true;
+    idea.v = L.setVote(idea.v, me, true, Date.now(), choice);
+    save();
+    undoStack.push({ id: idea.id, choice }); if (undoStack.length > UNDO_MAX) undoStack.shift();
+    pinTop = '';
+    const c = L.deckCounts(state, me), o = L.othersOn(idea, state, me), rt = revealText(o);
+    if (rt) toast(shortName(idea.title) + 'は、' + rt, ANSWER_TOAST_MS, 'toast-ans');
+    say(idea.title + 'に' + ANS_JP[choice] + 'と答えました。あと' + (c.total - c.answered) + '枚。' + rt);
+    try { if (navigator.vibrate) navigator.vibrate(12); } catch (err) { /* そのまま */ }
+    if (MILESTONE[c.answered] && !seenMilestone.has(c.answered)) { seenMilestone.add(c.answered); toast(MILESTONE[c.answered]); }
+    const quiet = reduceMotion();
+    el.classList.remove('drag', 'snap'); el.classList.add('fly'); el.dataset.ans = choice;
+    if (quiet) { el.style.removeProperty('transform'); el.style.opacity = '0'; } else {
+      const w = Math.max(window.innerWidth, 400);
+      const x = choice === 'g' ? w : choice === 'n' ? -w : 0, y = choice === 'm' ? -Math.round(window.innerHeight * 0.6) : 0;
+      el.style.transform = 'translate(' + x + 'px,' + y + 'px) rotate(' + (choice === 'g' ? 16 : choice === 'n' ? -16 : 0) + 'deg)';
+      el.style.opacity = '0';
+    }
+    setTimeout(() => { deckBusy = false; render(); refocus(focusSel); }, quiet ? FADE_MS : FLY_MS);
+  }
+  function undoLast(e) {
+    if (deckBusy) return;
+    const fromBtn = e && e.type === 'click';
+    while (undoStack.length) {
+      const u = undoStack.pop();
+      const idea = state.ideas.find(i => i.id === u.id && !i.deleted);
+      if (!idea || L.answerOf(idea, me) !== u.choice) continue; // 別の画面で答えを変えたカードは、そのままにする
+      idea.v = L.setVote(idea.v, me, false, Date.now());
+      save(); pinTop = u.id;
+      say(idea.title + 'の答えを取り消しました');
+      render(); if (fromBtn) refocus('.dtools .btn'); return;
+    }
+    toast('戻せる答えがありません');
+  }
+  // キーボード: → 行く / ← 行かない / ↑ 迷う / Backspace か z で戻す。ページに1つだけ(起動時に1回登録)
+  function deckKey(e) {
+    if (e.defaultPrevented || e.ctrlKey || e.metaKey || e.altKey) return;
+    if (tab !== 'ideas' || ideaMode !== 'deck' || ideaScreen !== 'main' || document.querySelector('dialog[open]')) return;
+    const a = document.activeElement;
+    if (a && (/^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName) || a.isContentEditable)) return;
+    const map = { ArrowRight: 'g', ArrowLeft: 'n', ArrowUp: 'm' };
+    if (map[e.key]) {
+      if (!deckTop || !deckTop.el.isConnected) return;
+      e.preventDefault(); answerNow(deckTop.idea, map[e.key], deckTop.el);
+    } else if (e.key === 'Backspace' || e.key === 'z' || e.key === 'Z') { e.preventDefault(); undoLast(); }
+  }
+
+  // ---- くわしく(詳細) ----
+  function votesBlock(idea) {
+    const members = L.liveMembers(state), bl = L.ballots(idea, members), pend = members.filter(n => !L.answerOf(idea, n));
+    return h('div', { class: 'faces' },
+      CHOICES.filter(([c]) => bl[c].length).map(([c, label]) => h('p', { class: 'face-row' }, h('span', { class: 'fl v-' + c, text: label }), bl[c].map(n => h('span', { class: 'face', text: who(n) })))),
+      pend.length ? h('p', { class: 'face-row' }, h('span', { class: 'fl', text: 'まだ' }), pend.map(n => h('span', { class: 'face', text: who(n) }))) : null);
+  }
+  function showDetail(idea, withVotes) {
+    return modal(idea.title, h('div', { class: 'detail' },
+      photoBlock(idea.id, idea.title, idea.category, idea.city),
+      h('p', { class: 'kicker' }, ic(CAT_ICON[idea.category] || 'map-pin'), [cityLabel(idea.city), idea.area].filter(Boolean).join(' ・ ')),
+      ideaChips(idea),
+      idea.note ? h('p', { class: 'note', text: idea.note }) : null,
+      idea.bestTime ? h('p', { class: 'small', text: 'おすすめの時間: ' + idea.bestTime }) : null,
+      idea.tip ? h('p', { class: 'small', text: 'ヒント: ' + idea.tip }) : null,
+      withVotes ? votesBlock(idea) : null,
+      h('div', { class: 'row gap links' }, mapLink(idea.mapQuery || (idea.title + ' ' + idea.city).trim()), extLink(idea.link, '情報元を見る', 'external-link'))),
+    [{ label: '閉じる', cls: 'btn primary', value: true }]);
+  }
+
+  // ---- みんなの結果 ----
+  const GROUPS = [['all', '全員が行く'], ['split', '意見が割れている'], ['maybe', '迷い中'], ['no', '行かない'], ['waiting', 'まだ全員は答えていません']];
+  function lastPlanLive() {
+    let ids = [];
+    try { ids = JSON.parse(ls.get(KEY.lastplan) || '[]'); } catch (e) { ids = []; }
+    return (Array.isArray(ids) ? ids : []).map(id => state.items.find(i => i.id === id && !i.deleted)).filter(Boolean);
+  }
+  async function undoPlan() {
+    const found = lastPlanLive(), mine = found.filter(i => i.u === i.bu), edited = found.length - mine.length;
+    if (!found.length) { ls.del(KEY.lastplan); toast('取り消せる自動プランはありません'); render(); return; }
+    const msg = mine.length ? '前回の自動プランで入れた予定のうち、' + mine.length + '件を取り消します。' + (edited ? '直した予定' + edited + '件は、そのまま残します。' : '') : '直した予定ばかりなので、取り消すものはありません。';
+    if (!mine.length) { toast(msg); ls.del(KEY.lastplan); render(); return; }
+    if (!(await confirmDlg(msg + '（ほかの予定は変わりません）', '取り消す', true))) return;
+    mine.forEach(i => removeEntity('items', i.id, true));
+    ls.del(KEY.lastplan); render();
+    toast(mine.length + '件を取り消しました' + (edited ? '（直した予定' + edited + '件は残しています）' : ''));
+    say(mine.length + '件の自動プランを取り消しました');
+  }
+  const undoPlanBtn = () => (lastPlanLive().length ? btn('いまの自動プランを取り消す', undoPlan, 'ghost', null, 'rotate-ccw') : null);
+  const planCount = p => p.days.reduce((s, d) => s + d.items.length, 0);
+  function resultTile(r) {
+    const idea = r.idea, said = [['g', r.go], ['m', r.maybe], ['n', r.no]].filter(([, a]) => a.length);
+    return h('li', { class: 'tile' },
+      photoBlock(idea.id, idea.title, idea.category, idea.city, { compact: true }),
+      h('button', { type: 'button', class: 'tile-main', 'aria-label': idea.title + 'の くわしい情報と、みんなの答えを見る', onclick: () => showDetail(idea, true) },
+        h('span', { class: 'tile-t', text: idea.title }),
+        said.map(([c, names]) => h('span', { class: 'face-row' }, h('span', { class: 'fl v-' + c, text: ANS_JP[c] }), names.map(n => h('span', { class: 'face', text: who(n) })))),
+        r.pending.length ? h('span', { class: 'face-row' }, h('span', { class: 'fl', text: 'まだ' }), r.pending.map(n => h('span', { class: 'face', text: who(n) }))) : null));
+  }
+  function viewResult() {
+    const R = L.resultGroups(state), root = h('div', { class: 'stack' });
+    const nonEmpty = GROUPS.filter(([k]) => R.groups[k].length);
+    const n = planCount(L.planProposal(state));
+    const why = R.members.length === 0 ? 'メンバーがいないので、まだ作れません。'
+      : R.pending.length && !R.groups.all.length ? 'まだ答えていない人がいるので、全員が行く場所は決まっていません。みんなが答えるのを待ちましょう。'
+        : !R.groups.all.length ? '全員が行く場所は、まだありません。'
+          : '新しく入れられる場所がありません（すでに日程に入っているか、入りきらない場所です）。';
+    root.append(h('div', { class: 'row between navrow' }, backBtn('デッキに戻る', 'main'), h('h2', { class: 'sec', text: 'みんなの結果' })));
+    root.append(h('section', { class: 'card' },
+      h('div', { 'aria-live': 'polite' },
+        R.pending.length
+          ? h('p', { class: 'lead' }, h('strong', { text: 'まだ答えていない人: ' }), R.pending.map(p => p.name + 'さん（' + p.answered + '/' + p.total + '）').join('、'))
+          : h('p', { class: 'lead', text: R.members.length ? 'みんな、最後まで答えました。' : 'メンバーがいません。' }),
+        R.unanswered ? h('p', { class: 'small', text: 'まだだれも答えていない候補: ' + R.unanswered + '件' }) : null),
+      h('div', { class: 'row gap' },
+        btn('全員が行く場所を日程に入れる', () => { plan = L.planProposal(state); planMsg = ''; ideaScreen = 'plan'; render(); window.scrollTo(0, 0); }, 'primary', { disabled: !n }, 'calendar-plus'),
+        undoPlanBtn()),
+      n ? h('p', { class: 'hint', text: '入れる前に、中身を確かめられます。' }) : h('p', { class: 'hint', text: why })));
+    if (!nonEmpty.length) root.append(h('div', { class: 'card empty' }, h('p', { class: 'empty-t', text: 'まだ答えがありません' }), h('p', { class: 'hint', text: 'デッキで答えると、ここに集まります。' })));
+    nonEmpty.forEach(([k, title]) => root.append(h('section', { class: 'card grp' },
+      h('h3', { class: 'sec', text: title + '（' + R.groups[k].length + '）' }),
+      h('ul', { class: 'plain rgrid' }, R.groups[k].map(resultTile)))));
+    root.append(footerLinks());
+    return root;
+  }
+
+  // ---- 自動プランの確認(保存するまで、何も変わらない) ----
+  const dText = d => d.m + '/' + d.d + '（' + WD[d.weekday] + '）';
+  const hrs = x => String(Math.round(x * 10) / 10);
+  const dur = x => (x < 1 ? Math.round(x * 60) + '分' : hrs(x) + '時間');
+  const MOVE_ERR = { closed: 'その日は休みです', city: 'この日は別の都市です', capacity: 'その日はいっぱいです', fixed: 'ツアーの日には入れられません', unknown: 'うまく動かせませんでした' };
+  const LEFT_WHY = { closed: '自由な日は、その場所の休みの日でした', capacity: '時間が足りませんでした', city: 'その都市の自由な日がありません', nofreeday: '自由時間の日がありません' };
+  function planItem(pi, day) {
+    const idea = pi.idea;
+    const sel = h('select', { 'aria-label': idea.title + 'を別の日に動かす', onchange: e => {
+      const r = L.planMove(plan, idea.id, e.target.value);
+      if (r.ok) { plan = r.plan; planMsg = ''; const nd = plan.days.find(d => d.id === e.target.value); if (nd && nd.id !== day.id) say(idea.title + 'を' + nd.m + '/' + nd.d + 'に動かしました'); } else { planMsg = idea.title + ': ' + (MOVE_ERR[r.error] || MOVE_ERR.unknown); toast(planMsg); say(planMsg); } // 画面の上にも出るが、下の方にいる人にも見えるように
+      render();
+    } }, plan.days.map(d => h('option', { value: d.id, selected: d.id === day.id, text: dText(d) + ' ' + cityLabel(d.city) })));
+    return h('li', { class: 'pitem' },
+      h('div', { class: 'pmain' },
+        h('p', { class: 'ptime', text: (pi.time || '時間は未定') + '　約' + dur(pi.hours) }),
+        h('p', { class: 'ptitle', text: idea.title }),
+        idea.area ? h('p', { class: 'small', text: idea.area }) : null,
+        pi.tentative || pi.booking ? h('p', { class: 'chips' },
+          pi.tentative ? h('span', { class: 'chip warn', text: 'まだ答えていない人がいます' + (pi.pending && pi.pending.length ? '（' + pi.pending.join('、') + '）' : '') }) : null,
+          pi.booking ? h('span', { class: 'chip warn', text: '予約が必要かも' }) : null) : null),
+      h('div', { class: 'pops' }, sel, iconBtn('trash', idea.title + 'をプランから外す', () => { plan = L.planRemove(plan, idea.id); planMsg = ''; say(idea.title + 'をプランから外しました'); render(); }, 'danger')));
+  }
+  function applyPlan() {
+    if (!plan) return;
+    if (!me) { needProfile().then(m => m && applyPlan()); return; }
+    const items = L.planToItems(plan, { by: me, now: Date.now() }).filter(Boolean);
+    if (!items.length) { toast('入れる予定がありません'); return; }
+    items.forEach(it => state.items.push(it));
+    ls.set(KEY.lastplan, JSON.stringify(items.map(i => i.id)));
+    plan = null; planMsg = ''; ideaScreen = 'result';
+    save();
+    toast(items.length + '件を日程に入れました。まちがえたときは、「候補」の「みんなの結果」から取り消せます');
+    go('itinerary');
+    say(items.length + '件を日程に入れました');
+  }
+  function viewPlan() {
+    if (!plan) { ideaScreen = 'result'; return viewResult(); }
+    const root = h('div', { class: 'stack' }), n = planCount(plan);
+    const fixed = [1, 4, 9, 10].map(k => { const d = L.dayDate(state.meta.year, k); return d.m + '/' + d.d; }).join('・');
+    root.append(h('div', { class: 'row between navrow' }, backBtn('戻る', 'result'), h('h2', { class: 'sec', text: '自動プランの確認' })));
+    root.append(h('section', { class: 'card hero' },
+      h('p', { class: 'lead', text: 'みんなの答えから、自由時間の日に入れる予定を並べました。' }),
+      h('ul', { class: 'bul' },
+        h('li', { text: 'まだ保存されていません。「この内容で日程に入れる」を押すまで、何も変わりません。' }),
+        h('li', { text: 'いまある予定は、消したり変えたりしません。ツアーの日（' + fixed + '）にも入れません。' }),
+        h('li', { text: 'のぞまない予定は、ゴミ箱ボタンで外せます。日付の選択で、ほかの日へ動かせます。' }),
+        h('li', { text: '1日の時間は、1件ごとに30分の休憩を入れた目安です（上限6.5時間）。' })),
+      plan.tentative ? h('p', { class: 'hint', text: '「まだ答えていない人がいます」の予定は、全員が答えてから決めても大丈夫です。' }) : null,
+      h('p', { class: 'err', role: 'alert', text: planMsg })));
+    plan.days.forEach(d => root.append(h('section', { class: 'card pday', 'aria-label': dText(d) + ' ' + cityLabel(d.city) },
+      h('h3', { class: 'sec', text: dText(d) }),
+      h('p', { class: 'chips' }, h('span', { class: 'chip free', text: cityLabel(d.city) }), h('span', { class: 'chip', text: '約' + hrs(typeof d.load === 'number' ? d.load : d.hours) + ' / 6.5時間' })),
+      d.items.length ? h('ul', { class: 'plain' }, d.items.map(pi => planItem(pi, d))) : h('p', { class: 'hint', text: 'この日は、入れる予定がありません。' }))));
+    if (plan.leftovers && plan.leftovers.length) root.append(h('section', { class: 'card soft' },
+      h('h3', { class: 'sec', text: '入りきらなかった候補（' + plan.leftovers.length + '）' }),
+      h('ul', { class: 'plain' }, plan.leftovers.map(l => h('li', { class: 'left' }, h('strong', { text: l.idea.title }), h('span', { class: 'small', text: '　' + (LEFT_WHY[l.reason] || '') }))))));
+    root.append(h('div', { class: 'row gap' },
+      btn('この内容で日程に入れる', applyPlan, 'primary', { disabled: !n }, 'calendar-plus'),
+      btn('やめる', () => { plan = null; ideaScreen = 'result'; render(); window.scrollTo(0, 0); }, 'ghost'),
+      undoPlanBtn()));
+    if (!n) root.append(h('p', { class: 'hint', text: '入れる予定がありません。デッキに戻って、答えを増やしましょう。' }));
+    return root;
   }
 
   // ================= 予算 =================
@@ -830,7 +1242,10 @@
     }
     strip(); render();
     toast(r === 'offline' ? 'いまは通信できません。つながったら自動で参加します' : '共有プランに参加しました。みんなの変更がここに届きます');
-    if (!me) chooseProfile(true);
+    // 共有リンクで入った人は、名前を決めたら、そのままデッキへ(まだ答えていない候補があるときだけ)
+    if (!me) await chooseProfile(true);
+    const c = me ? L.deckCounts(state, me) : null;
+    if (c && c.answered < c.total) enterDeck();
   }
   async function leaveFlow() {
     if (!(await confirmDlg('この共有プランから抜けます。この端末の内容は残りますが、みんなとはつながらなくなります。プランそのものは消えません。', '抜ける', true))) return;
@@ -1075,7 +1490,11 @@
     }
   }
   function render() {
+    if (deckBusy || dragging) { deferredRender = true; return; } // カードを飛ばしている間・指で動かしている間は作り直さない(終わったら作り直す)
+    deferredRender = false;
     normalizeMe();
+    if (!(tab === 'ideas' && ideaMode === 'deck' && ideaScreen === 'main')) { undoStack.length = 0; pinTop = ''; } // 戻す履歴は、デッキを離れたら捨てる
+    if (!(tab === 'ideas' && ideaMode === 'deck' && (ideaScreen === 'main' || ideaScreen === 'plan'))) say(''); // 読み上げの文も、画面を離れたら消す
     updateChip();
     updateCover();
     meBtn.replaceChildren(ic(me ? 'user-round' : 'user-round'), me ? who(me) : '名前を決める');
@@ -1095,7 +1514,7 @@
   function go(t) {
     if (t !== 'about') ls.set(KEY.tab, t);
     if (t === 'about' && tab !== 'about') prevTab = tab;
-    tab = t; render(); window.scrollTo(0, 0);
+    endDrag(); tab = t; render(); window.scrollTo(0, 0);
   }
 
   async function loadIdeas() {
@@ -1146,12 +1565,18 @@
   function firstRun() {
     if (ls.get(KEY.seen) || me || live('people').length || /^#[rs]=/.test(location.hash)) return;
     ls.set(KEY.seen, '1');
-    chooseProfile(true, true);
+    chooseProfile(true, true).then(ok => { if (ok === true && me) enterDeck(); }); // 名前を決めたら、そのままデッキへ
   }
 
   load();
   document.querySelectorAll('nav.tabs [data-tab]').forEach(b => b.addEventListener('click', () => go(b.dataset.tab)));
   window.addEventListener('hashchange', checkHash);
+  document.addEventListener('keydown', deckKey); // デッキのキー操作(ここで1回だけ登録)
+  // ほかのアプリに移った(blur)ときは、解除までの時間を2秒に縮める。すぐ戻ったとき(focus)は、元の10秒にもどす
+  const dragAway = away => { if (dragging) armDrag(away ? DRAG_AWAY_MS : DRAG_MAX_MS); };
+  window.addEventListener('blur', () => dragAway(true));
+  window.addEventListener('focus', () => dragAway(false));
+  document.addEventListener('visibilitychange', () => dragAway(document.visibilityState === 'hidden'));
   render();
   initSync();
   Promise.all([loadCredits(), loadIdeas()]).then(() => { checkHash(); firstRun(); });
